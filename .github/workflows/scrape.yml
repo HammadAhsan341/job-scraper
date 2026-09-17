@@ -1,0 +1,132 @@
+name: Daily Job Scrape
+
+on:
+  schedule:
+    # Scheduled runs are Indeed + LinkedIn only (alternating). Rozee/Mustakbil are manual.
+    - cron: "0 20 * * *" # 1am PKT — LinkedIn, Role Set 1
+    - cron: "0 23 * * *" # 4am PKT — Indeed, Role Set 1
+    - cron: "0 2 * * *" # 7am PKT — LinkedIn, Role Set 2
+    - cron: "0 5 * * *" # 10am PKT — Indeed, Role Set 2
+    - cron: "0 8 * * *" # 1pm PKT — LinkedIn, Role Set 1
+    - cron: "0 11 * * *" # 4pm PKT — Indeed, Role Set 1
+    - cron: "0 15 * * *" # 8pm PKT — LinkedIn, Role Set 2
+    - cron: "0 17 * * *" # 10pm PKT — Indeed, Role Set 2
+  workflow_dispatch:
+    inputs:
+      boards:
+        description: "Boards to scrape"
+        required: false
+        default: "linkedin,indeed"
+        type: choice
+        options:
+          - linkedin,indeed
+          - indeed,linkedin
+          - linkedin
+          - indeed
+          - all
+          - rozee
+          - mustakbil
+      role_set:
+        description: "Which role set to use"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - "1"
+          - "2"
+
+concurrency:
+  group: daily-job-scrape
+  cancel-in-progress: true
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      JOB_SCRAPING_MAX_PAGES_PER_BOARD: ${{ secrets.JOB_SCRAPING_MAX_PAGES_PER_BOARD }}
+      JOB_SCRAPING_MAX_JOBS_PER_BOARD: ${{ secrets.JOB_SCRAPING_MAX_JOBS_PER_BOARD }}
+      JOB_SCRAPING_DOWNLOAD_DELAY: ${{ secrets.JOB_SCRAPING_DOWNLOAD_DELAY }}
+      JOB_STALE_AFTER_DAYS: ${{ secrets.JOB_STALE_AFTER_DAYS }}
+      # Match muhammadhaider02/Scrapling-Job-Boards-Scrapper: in-process
+      # StealthyFetcher, network_idle, 4 workers, 3 in-flight fetches.
+      JOB_SCRAPING_WORKERS: "4"
+      JOB_SCRAPING_MAX_CONCURRENT_FETCHES: "3"
+      JOB_SCRAPING_RETRY_BACKOFF_SECONDS: ${{ secrets.JOB_SCRAPING_RETRY_BACKOFF_SECONDS }}
+      JOB_SCRAPING_FETCH_TIMEOUT_SECONDS: "0"
+      JOB_SCRAPING_FETCH_RETRIES: "0"
+      JOB_SCRAPING_NETWORK_IDLE: "true"
+      JOB_SCRAPING_DETAIL_NETWORK_IDLE: "true"
+      JOB_SCRAPING_FETCH_ISOLATE: "false"
+      JOB_SCRAPING_BROWSER_HARD_TIMEOUT_SECONDS: "0"
+      JOB_SCRAPING_DETAIL_HARD_TIMEOUT_SECONDS: "0"
+      JOB_SCRAPING_MAX_DETAIL_FETCHES: "0"
+      PERMITTED_ROLES_1: ${{ secrets.PERMITTED_ROLES_1 }}
+      PERMITTED_ROLES_2: ${{ secrets.PERMITTED_ROLES_2 }}
+      EXCEL_SKILL_GAP: data/skills_master.xlsx
+      JOB_SCRAPING_BOARDS: >-
+        ${{
+          github.event_name == 'workflow_dispatch' && github.event.inputs.boards ||
+          github.event.schedule == '0 20 * * *' && 'linkedin' ||
+          github.event.schedule == '0 23 * * *' && 'indeed' ||
+          github.event.schedule == '0 2 * * *' && 'linkedin' ||
+          github.event.schedule == '0 5 * * *' && 'indeed' ||
+          github.event.schedule == '0 8 * * *' && 'linkedin' ||
+          github.event.schedule == '0 11 * * *' && 'indeed' ||
+          github.event.schedule == '0 15 * * *' && 'linkedin' ||
+          github.event.schedule == '0 17 * * *' && 'indeed' ||
+          'indeed,linkedin'
+        }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install Playwright browser
+        run: uv run playwright install --with-deps chromium
+
+      - name: Resolve role set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ROLE_SET="${{ github.event.inputs.role_set }}"
+          elif [ "${{ github.event.schedule }}" = "0 20 * * *" ] || \
+               [ "${{ github.event.schedule }}" = "0 23 * * *" ] || \
+               [ "${{ github.event.schedule }}" = "0 8 * * *" ] || \
+               [ "${{ github.event.schedule }}" = "0 11 * * *" ]; then
+            ROLE_SET="1"
+          elif [ "${{ github.event.schedule }}" = "0 2 * * *" ] || \
+               [ "${{ github.event.schedule }}" = "0 5 * * *" ] || \
+               [ "${{ github.event.schedule }}" = "0 15 * * *" ] || \
+               [ "${{ github.event.schedule }}" = "0 17 * * *" ]; then
+            ROLE_SET="2"
+          else
+            ROLE_SET="all"
+          fi
+
+          if [ "$ROLE_SET" = "1" ]; then
+            echo "PERMITTED_ROLES=$PERMITTED_ROLES_1" >> $GITHUB_ENV
+          elif [ "$ROLE_SET" = "2" ]; then
+            echo "PERMITTED_ROLES=$PERMITTED_ROLES_2" >> $GITHUB_ENV
+          else
+            python3 -c "
+          import json, os
+          r1 = json.loads(os.environ.get('PERMITTED_ROLES_1', '[]'))
+          r2 = json.loads(os.environ.get('PERMITTED_ROLES_2', '[]'))
+          merged = list(dict.fromkeys(r1 + r2))
+          print('PERMITTED_ROLES=' + json.dumps(merged))
+          " >> $GITHUB_ENV
+          fi
+
+      - name: Run scraper
+        run: uv run python -u main.py

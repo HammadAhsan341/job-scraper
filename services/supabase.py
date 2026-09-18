@@ -388,7 +388,9 @@ class SupabaseService:
             if location:
                 query = query.ilike("location", f"%{location}%")
             
-            response = query.limit(limit).order("date_scrapped", desc=True).execute()
+            response = query.limit(limit).order("posted_at", desc=True).order(
+                "date_scrapped", desc=True
+            ).execute()
             return response.data if response.data else []
             
         except APIError as e:

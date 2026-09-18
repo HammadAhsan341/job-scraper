@@ -26,7 +26,9 @@ from scraper.boards import (
     RozeeParser,
 )
 from scraper.fetch_worker import worker_entry, _stealthy_fetch
+from scraper.boards.indeed_jd import jk_from_job_url
 from scraper.guest import destination_job_url, is_auth_wall, merge_listing_with_detail
+from scraper.listing_persist import is_persistable_job, prepare_job_for_persist
 
 _board_fetch_gates: Dict[str, threading.Semaphore] = {}
 _board_fetch_gates_lock = threading.Lock()
@@ -252,6 +254,14 @@ def _fetch_once(
         if detail_hard > hard_timeout_s:
             hard_timeout_s = detail_hard
 
+    board_key = (board or "").lower()
+    if job_detail and board_key == "indeed":
+        isolate = True
+        if hard_timeout_s <= 0:
+            hard_timeout_s = 180.0
+        elif hard_timeout_s < 120.0:
+            hard_timeout_s = 120.0
+
     gate = _board_fetch_gate(board)
     gate_wait_s = timeout_s if timeout_s > 0 else None
     acquired = gate.acquire(timeout=gate_wait_s) if gate_wait_s else gate.acquire()
@@ -424,8 +434,10 @@ class JobScraperSpider:
             job_id = job.get("job_id") or ""
             desc = (job.get("description") or "").strip()
             board_name = (job.get("board") or board or "").lower()
-            if board_name in {"linkedin", "indeed"} and len(desc) < 50:
+            if not is_persistable_job(job, board_name):
                 return
+            job = prepare_job_for_persist(job, board_name)
+            desc = (job.get("description") or "").strip()
             prev_len = emitted_desc_len.get(job_id, -1)
             if job_id and len(desc) <= prev_len:
                 return
@@ -472,7 +484,7 @@ class JobScraperSpider:
             # Same as muhammadhaider02/Scrapling-Job-Boards-Scrapper.
             return True
 
-        def _job_from_page(job_url: str, job_response):
+        def _job_from_page(job_url: str, job_response, listing=None):
             """Prefer the live-page parse from the fetch worker; fall back to HTML."""
             parsed = getattr(job_response, "parsed_job", None) if job_response else None
             if parsed and len((parsed.get("description") or "").strip()) >= 50:
@@ -481,27 +493,139 @@ class JobScraperSpider:
                 return parsed
             if not job_response:
                 return None
+            if board == "indeed" and hasattr(parser, "parse_from_response"):
+                return parser.parse_from_response(job_response, listing)
             return parser.parse_job(job_response)
 
-        def _fetch_job_page(job_url: str):
-            response = _fetch_with_fallback(
-                job_url,
-                network_idle=True,
-                job_detail=True,
-            )
-            dest = destination_job_url(response, job_url)
-            landed = getattr(response, "url", "") or ""
-            bounced = is_auth_wall(response, job_url) or not response
-            if dest and bounced and dest.split("?")[0] != landed.split("?")[0]:
-                print(f"      following rendered job URL: {dest}")
-                followed = _fetch_with_fallback(
-                    dest,
+        def _fetch_job_page(job_url: str, headless_first: Optional[bool] = None):
+            if headless_first is None:
+                headless_first = board != "indeed"
+
+            def _load(url: str, headless: bool):
+                return _fetch(
+                    url,
+                    headless=headless,
                     network_idle=True,
                     job_detail=True,
                 )
-                if followed:
-                    return followed
+
+            order = (True, False) if headless_first else (False, True)
+            response = None
+            for headless in order:
+                response = _load(job_url, headless)
+                dest = destination_job_url(response, job_url)
+                landed = getattr(response, "url", "") or ""
+                bounced = is_auth_wall(response, job_url) or not response
+                if dest and bounced and dest.split("?")[0] != landed.split("?")[0]:
+                    print(f"      following rendered job URL: {dest}")
+                    followed = _load(dest, headless)
+                    if followed:
+                        response = followed
+                if response and not is_auth_wall(response, job_url):
+                    break
             return response
+
+        def _fetch_indeed_serp_jd(job_url: str, listing_card=None, serp_page: int = 1):
+            """Approach 1: stay on search results (?vjk=) and read mosaic / pane JD."""
+            jk = jk_from_job_url(job_url)
+            if not jk or not hasattr(parser, "build_serp_vjk_url"):
+                return None
+            serp_url = parser.build_serp_vjk_url(query, location, jk, page=serp_page)
+            print(f"      Indeed SERP pane fetch: vjk={jk[:10]}…")
+            serp_resp = _fetch(
+                serp_url,
+                headless=True,
+                network_idle=True,
+                job_detail=False,
+            )
+            if not serp_resp or is_auth_wall(serp_resp, serp_url):
+                return None
+            serp_job = parser.parse_serp_detail(serp_resp, job_url, listing_card)
+            if not serp_job or len((serp_job.get("description") or "")) < 50:
+                return None
+            print(
+                f"      JD from search pane ({len(serp_job['description'])} chars)"
+            )
+            try:
+                serp_resp.parsed_job = dict(serp_job)
+            except Exception:
+                pass
+            return serp_resp
+
+        def _indeed_interactive_fetch(job_url: str, listing_card=None):
+            """Approach 2: headful browser — user passes captcha; scrape #jobDescriptionText div."""
+            if not getattr(self.settings, "job_scraping_indeed_interactive", False):
+                return None
+            from scraper.indeed_interactive import fetch_indeed_interactive
+
+            jk = jk_from_job_url(job_url)
+            urls = []
+            if jk and hasattr(parser, "build_serp_vjk_url"):
+                urls.append(parser.build_serp_vjk_url(query, location, jk))
+            urls.append(job_url)
+            wait_s = float(
+                getattr(self.settings, "job_scraping_indeed_interactive_wait_seconds", 300)
+                or 300
+            )
+            print(
+                f"      Indeed interactive browser (solve captcha if shown, "
+                f"up to {wait_s:.0f}s)…"
+            )
+            payload = fetch_indeed_interactive(
+                urls,
+                wait_seconds=wait_s,
+                headless=False,
+            )
+            if not payload:
+                return None
+            desc = (payload.get("description") or "").strip()
+            if len(desc) < 50:
+                return None
+            listing = listing_card or {}
+            job = parser.parse_from_html(
+                payload.get("html") or "",
+                job_url,
+                listing,
+            )
+            if not job:
+                job = {
+                    "job_id": parser.generate_job_id(
+                        listing.get("title") or "Untitled",
+                        listing.get("company") or "Unknown",
+                        listing.get("location") or "Pakistan",
+                    ),
+                    "title": listing.get("title") or "Untitled",
+                    "company": listing.get("company") or "Unknown",
+                    "location": listing.get("location") or "Pakistan",
+                    "job_url": job_url,
+                    "board": board,
+                    "description": desc,
+                    "skills": [],
+                }
+            elif len((job.get("description") or "")) < 50:
+                job = dict(job)
+                job["description"] = desc
+            print(f"      JD from interactive browser ({len(desc)} chars)")
+            return FetchedPage(
+                str(payload.get("final_url") or job_url),
+                200,
+                str(payload.get("html") or ""),
+                parsed_job=dict(job),
+            )
+
+        def _fetch_indeed_job_page(
+            job_url: str,
+            listing_card=None,
+            serp_page: int = 1,
+        ):
+            serp = _fetch_indeed_serp_jd(job_url, listing_card, serp_page=serp_page)
+            if serp:
+                return serp
+            view = _fetch_job_page(job_url)
+            if view and not is_auth_wall(view, job_url):
+                return view
+            interactive = _indeed_interactive_fetch(job_url, listing_card)
+            return interactive or view
 
         for page in range(1, max_pages + 1):
             try:
@@ -580,28 +704,52 @@ class JobScraperSpider:
                         print(f"   Job {i}/{len(job_urls)}: {job_url}")
                         details_used += 1
 
-                        job_response = _fetch_job_page(job_url)
-                        job_data = _job_from_page(job_url, job_response)
+                        listing_card = None
+                        if job_url in jobs_by_url:
+                            listing_card = jobs[jobs_by_url[job_url]]
+
+                        if board == "indeed":
+                            job_response = _fetch_indeed_job_page(
+                                job_url, listing_card, serp_page=page
+                            )
+                        else:
+                            job_response = _fetch_job_page(job_url)
+                        job_data = _job_from_page(
+                            job_url, job_response, listing_card
+                        )
                         desc_len = len((job_data or {}).get("description") or "")
 
                         # Reference scraper retries headful when the JD is missing
                         # and this is not a login bounce.
                         if (
-                            desc_len < 50
+                            board != "indeed"
+                            and desc_len < 50
                             and job_response
                             and not is_auth_wall(job_response, job_url)
                         ):
                             print("      retrying job tab headful for JD")
-                            headful = _fetch(
-                                job_url,
-                                headless=False,
-                                network_idle=_board_idle(),
-                                job_detail=True,
+                            headful = _fetch_job_page(
+                                job_url, headless_first=False
                             )
-                            parsed = _job_from_page(job_url, headful)
+                            parsed = _job_from_page(
+                                job_url, headful, listing_card
+                            )
                             if parsed and len(parsed.get("description") or "") > desc_len:
                                 job_data = parsed
                                 desc_len = len(job_data.get("description") or "")
+
+                        if board == "indeed" and desc_len < 50:
+                            interactive = _indeed_interactive_fetch(
+                                job_url, listing_card
+                            )
+                            if interactive:
+                                parsed = _job_from_page(
+                                    job_url, interactive, listing_card
+                                )
+                                if parsed and len(parsed.get("description") or "") > desc_len:
+                                    job_data = parsed
+                                    job_response = interactive
+                                    desc_len = len(job_data.get("description") or "")
 
                         if job_data and desc_len >= 50:
                             if job_url in jobs_by_url:
@@ -619,9 +767,15 @@ class JobScraperSpider:
                         elif is_auth_wall(job_response, job_url) or not job_response:
                             auth_walls += 1
                             reason = "auth/bot wall" if job_response else "fetch failed"
-                            print(f"      {reason}; keeping listing URL")
+                            print(f"      {reason}; keeping listing card")
+                            if job_url in jobs_by_url:
+                                idx = jobs_by_url[job_url]
+                                _emit_job(jobs[idx])
                         else:
-                            print("      Failed to parse job; keeping listing URL")
+                            print("      Failed to parse job; keeping listing card")
+                            if job_url in jobs_by_url:
+                                idx = jobs_by_url[job_url]
+                                _emit_job(jobs[idx])
 
                         time.sleep(self.settings.job_scraping_download_delay)
 

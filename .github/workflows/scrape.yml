@@ -2,7 +2,6 @@ name: Daily Job Scrape
 
 on:
   schedule:
-    # Scheduled runs are Indeed + LinkedIn only (alternating). Rozee/Mustakbil are manual.
     - cron: "0 20 * * *" # 1am PKT — LinkedIn, Role Set 1
     - cron: "0 23 * * *" # 4am PKT — Indeed, Role Set 1
     - cron: "0 2 * * *" # 7am PKT — LinkedIn, Role Set 2
@@ -16,7 +15,7 @@ on:
       boards:
         description: "Boards to scrape"
         required: false
-        default: "linkedin,indeed"
+        default: "indeed"
         type: choice
         options:
           - linkedin,indeed
@@ -38,7 +37,10 @@ on:
 
 concurrency:
   group: daily-job-scrape
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   scrape:
@@ -53,19 +55,21 @@ jobs:
       JOB_SCRAPING_MAX_JOBS_PER_BOARD: ${{ secrets.JOB_SCRAPING_MAX_JOBS_PER_BOARD }}
       JOB_SCRAPING_DOWNLOAD_DELAY: ${{ secrets.JOB_SCRAPING_DOWNLOAD_DELAY }}
       JOB_STALE_AFTER_DAYS: ${{ secrets.JOB_STALE_AFTER_DAYS }}
-      # Match muhammadhaider02/Scrapling-Job-Boards-Scrapper: in-process
-      # StealthyFetcher, network_idle, 4 workers, 3 in-flight fetches.
-      JOB_SCRAPING_WORKERS: "4"
-      JOB_SCRAPING_MAX_CONCURRENT_FETCHES: "3"
+      JOB_SCRAPING_WORKERS: "2"
+      JOB_SCRAPING_MAX_CONCURRENT_FETCHES: "1"
       JOB_SCRAPING_RETRY_BACKOFF_SECONDS: ${{ secrets.JOB_SCRAPING_RETRY_BACKOFF_SECONDS }}
       JOB_SCRAPING_FETCH_TIMEOUT_SECONDS: "0"
       JOB_SCRAPING_FETCH_RETRIES: "0"
+      JOB_SCRAPING_FETCH_RETRY_DELAY_SECONDS: "8"
       JOB_SCRAPING_NETWORK_IDLE: "true"
       JOB_SCRAPING_DETAIL_NETWORK_IDLE: "true"
       JOB_SCRAPING_FETCH_ISOLATE: "false"
       JOB_SCRAPING_BROWSER_HARD_TIMEOUT_SECONDS: "0"
-      JOB_SCRAPING_DETAIL_HARD_TIMEOUT_SECONDS: "0"
+      JOB_SCRAPING_DETAIL_HARD_TIMEOUT_SECONDS: "180"
+      JOB_SCRAPING_BOARD_TIMEOUT_LIMIT: "3"
+      JOB_SCRAPING_BOARD_COOLDOWN_SECONDS: "90"
       JOB_SCRAPING_MAX_DETAIL_FETCHES: "0"
+      JOB_SCRAPING_INDEED_INTERACTIVE: "false"
       PERMITTED_ROLES_1: ${{ secrets.PERMITTED_ROLES_1 }}
       PERMITTED_ROLES_2: ${{ secrets.PERMITTED_ROLES_2 }}
       EXCEL_SKILL_GAP: data/skills_master.xlsx
@@ -89,12 +93,17 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
         run: uv sync
 
       - name: Install Playwright browser
         run: uv run playwright install --with-deps chromium
+
+      - name: Preflight (secrets + roles)
+        run: uv run python scripts/validate_ci_env.py
 
       - name: Resolve role set
         run: |

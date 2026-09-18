@@ -180,8 +180,8 @@ Apply [`supabase/migrations/001_full_job_payload.sql`](supabase/migrations/001_f
 ## Getting Started
 
 ```bash
-git clone https://github.com/HammadAhsan341/job-scraper.git
-cd job-scraper
+git clone <repo-url>
+cd Scrapling-Job-Board-Scrapper
 
 # Install dependencies
 uv sync
@@ -202,8 +202,6 @@ uv run python main.py
 ---
 
 ## Deployment
-
-This public repo is the GitHub Actions runner (unlimited minutes). The private resume-builder app only reads the same Supabase `jobs` table.
 
 The scraper is deployed via **GitHub Actions** with 8 scheduled runs per day - LinkedIn and Indeed alternate every 3 hours with each role set scraped twice. No server required.
 
@@ -237,9 +235,15 @@ The scraper is deployed via **GitHub Actions** with 8 scheduled runs per day - L
 | `JOB_SCRAPING_DOWNLOAD_DELAY`         | Delay in seconds between requests             |
 | `JOB_STALE_AFTER_DAYS`                | Days after which scraped jobs are deleted     |
 
+All of the secrets above are **required** except `JOB_SCRAPING_WORKERS` and `JOB_SCRAPING_MAX_CONCURRENT_FETCHES` (the workflow defaults those to `2` and `1` on GitHub).
+
+**Indeed full job descriptions:** CI uses the search-pane (`vjk`) + mosaic JSON extractor (no captcha UI). Keep `JOB_SCRAPING_FETCH_TIMEOUT_SECONDS=0` and `JOB_SCRAPING_INDEED_INTERACTIVE=false` in Actions.
+
+If a workflow run fails in a few seconds with **no log steps**, check **Settings → Billing → Actions** (private repos need available minutes) and that no other `Daily Job Scrape` run is stuck queued.
+
 3. Go to **Actions → Daily Job Scrape → Run workflow** to trigger a manual run - use the dropdowns to select a specific board and role set, or leave as "all" for both
 
-The workflow file is at `.github/workflows/scrape.yml`.
+The workflow file is at `.github/workflows/scrape.yml`. A preflight step runs `job-scraper/scripts/validate_ci_env.py` before scraping.
 
 ---
 

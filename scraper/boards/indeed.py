@@ -4,10 +4,28 @@ Indeed Pakistan job parser using Scrapling.
 Indeed is a global job search engine with Pakistan listings.
 """
 
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from core.state import JobData
-from scraper.guest import jsonld_job_description
+from scraper.guest import jsonld_job_description, jsonld_job_posting
+from scraper.boards.indeed_jd import extract_description_multi
 from .base import BaseJobParser
+
+
+class _HtmlResponse:
+    """Minimal Scrapling-like wrapper for parsing saved HTML."""
+
+    def __init__(self, html: str, url: str = ""):
+        self.url = url or ""
+        self.body = html or ""
+        self.html_content = self.body
+        self._selector = None
+
+    def css(self, selector: str):
+        if self._selector is None:
+            from scrapling.parser import Selector
+
+            self._selector = Selector(content=self.body, url=self.url)
+        return self._selector.css(selector)
 
 
 class IndeedParser(BaseJobParser):
@@ -58,18 +76,31 @@ class IndeedParser(BaseJobParser):
             JobData or None
         """
         try:
-            # Extract title
-            title = self._css_first(response, [
-                "h1.jobsearch-JobInfoHeader-title",
-                ".jobsearch-JobInfoHeader-title-container h1",
-                "h1[data-testid='jobsearch-JobInfoHeader-title']"
-            ])
+            html = self._get_html(response)
+            ld = jsonld_job_posting(html)
+
+            title_text = self.clean_text(ld.get("title") or "")
+            title = None
+            if not title_text:
+                title = self._css_first(response, [
+                    "h1.jobsearch-JobInfoHeader-title",
+                    ".jobsearch-JobInfoHeader-title-container h1",
+                    "h1[data-testid='jobsearch-JobInfoHeader-title']",
+                    "[data-testid='jobsearch-JobInfoHeader-title']",
+                    "h1",
+                ])
+                title_text = self.clean_text(self._get_text(title)) if title else ""
+            if not title_text:
+                og = self._css_first(response, [
+                    "meta[property='og:title']",
+                    "meta[name='twitter:title']",
+                ])
+                if og is not None and hasattr(og, "attrib"):
+                    title_text = self.clean_text(og.attrib.get("content") or "")
             
-            if not title:
-                print(f"Indeed: No title found at {response.url}")
+            if not title_text:
+                print(f"Indeed: No title found at {getattr(response, 'url', '')}")
                 return None
-            
-            title_text = self.clean_text(self._get_text(title))
             
             # Extract company
             company = self._css_first(response, [
@@ -78,7 +109,9 @@ class IndeedParser(BaseJobParser):
                 ".jobsearch-CompanyInfoContainer a"
             ])
             
-            company_text = self.clean_text(self._get_text(company)) if company else "Unknown"
+            company_text = self.clean_text(self._get_text(company)) if company else ""
+            if not company_text or company_text.lower() == "unknown":
+                company_text = self.clean_text(ld.get("company") or "") or "Unknown"
             
             # Extract location
             location = self._css_first(response, [
@@ -87,24 +120,28 @@ class IndeedParser(BaseJobParser):
                 ".jobsearch-JobInfoHeader-subtitle .jobsearch-JobInfoHeader-subtitle-link"
             ])
             
-            location_text = self.clean_text(self._get_text(location)) if location else "Pakistan"
+            location_text = self.clean_text(self._get_text(location)) if location else ""
+            if not location_text:
+                location_text = self.clean_text(ld.get("location") or "") or "Pakistan"
             
-            # Extract description (viewjob + search-panel + JSON-LD)
-            description = self._css_first(response, [
-                "div#jobDescriptionText",
-                ".jobsearch-jobDescriptionText",
-                "div[id='jobDescriptionText']",
-                "#job-description",
-                "div[data-testid='jobsearch-JobComponent-description']",
-            ])
-            
-            description_text = ""
-            if description:
-                description_text = self.clean_text(self._get_text(description))
+            # Extract description (DOM JD div, mosaic JSON, JSON-LD)
+            description_text, _jd_source = extract_description_multi(html, response)
             if len(description_text) < 50:
-                description_text = self.clean_text(
-                    jsonld_job_description(self._get_html(response))
-                ) or description_text
+                description = self._css_first(response, [
+                    "div#jobDescriptionText",
+                    ".jobsearch-jobDescriptionText",
+                    "div[id='jobDescriptionText']",
+                    "#job-description",
+                    "div[data-testid='jobsearch-JobComponent-description']",
+                    "div.jobsearch-JobComponent-description",
+                    "#jobDescriptionText .jobsearch-JobComponent-description",
+                ])
+                if description:
+                    description_text = self.clean_text(self._get_text(description))
+            if len(description_text) < 50:
+                description_text = self.clean_text(ld.get("description") or "") or description_text
+            if len(description_text) < 50:
+                description_text = self.clean_text(jsonld_job_description(html)) or description_text
             
             if not description_text or len(description_text) < 50:
                 print(f"Indeed: Description too short at {response.url}")
@@ -170,6 +207,185 @@ class IndeedParser(BaseJobParser):
         except Exception as e:
             print(f"Indeed parse error: {e}")
             return None
+
+    def build_serp_vjk_url(
+        self,
+        query: str,
+        location: str,
+        job_key: str,
+        page: int = 1,
+    ) -> str:
+        """Search results with right-pane JD bootstrap (avoids viewjob auth redirect)."""
+        import urllib.parse
+
+        if not job_key:
+            return ""
+        q = urllib.parse.quote(query or "")
+        loc = urllib.parse.quote(location or "Pakistan")
+        url = f"https://pk.indeed.com/jobs?q={q}&l={loc}&vjk={job_key}"
+        start = (page - 1) * 10
+        if start > 0:
+            url += f"&start={start}"
+        return url
+
+    def parse_serp_detail(
+        self,
+        response: Any,
+        job_url: str,
+        listing: Optional[Dict[str, Any]] = None,
+    ) -> Optional[JobData]:
+        """Extract JD from jobs search page (?vjk=) mosaic / panel DOM."""
+        if not response:
+            return None
+        html = self._get_html(response)
+        description_text, _src = extract_description_multi(html, response)
+        if len(description_text) < 50:
+            return None
+        listing = listing or {}
+        ld = jsonld_job_posting(html)
+        title_text = (
+            listing.get("title")
+            or self.clean_text(ld.get("title") or "")
+            or ""
+        )
+        company_text = (
+            listing.get("company")
+            or self.clean_text(ld.get("company") or "")
+            or "Unknown"
+        )
+        location_text = (
+            listing.get("location")
+            or self.clean_text(ld.get("location") or "")
+            or "Pakistan"
+        )
+        canonical_url = job_url or listing.get("job_url") or getattr(response, "url", "")
+        job_data: JobData = {
+            "job_id": self.generate_job_id(
+                str(title_text), str(company_text), str(location_text)
+            ),
+            "title": str(title_text),
+            "company": str(company_text),
+            "location": str(location_text),
+            "job_url": canonical_url,
+            "board": self.board_name,
+            "description": description_text,
+            "skills": [],
+            "posted_date": listing.get("posted_date"),
+            "salary": None,
+            "employment_type": None,
+            "experience_required": None,
+            "raw_html": html,
+        }
+        if self.validate_job_data(job_data):
+            return job_data
+        return None
+
+    def parse_from_html(
+        self,
+        html: str,
+        job_url: str,
+        listing: Optional[Dict[str, Any]] = None,
+    ) -> Optional[JobData]:
+        """Parse viewjob HTML when live selectors fail (JSON-LD + listing merge)."""
+        if not html or not job_url:
+            return None
+        listing = listing or {}
+        page = _HtmlResponse(html, job_url)
+        multi_text, _ = extract_description_multi(html, page)
+        job = self.parse_job(page)
+        if job and len((job.get("description") or "")) < 50 and len(multi_text) >= 50:
+            job = dict(job)
+            job["description"] = multi_text
+        if job and len((job.get("description") or "")) >= 50:
+            return self._merge_listing_fields(job, listing, job_url)
+        ld = jsonld_job_posting(html)
+        title_text = (
+            (job or {}).get("title")
+            or listing.get("title")
+            or self.clean_text(ld.get("title") or "")
+        )
+        company_text = (
+            (job or {}).get("company")
+            or listing.get("company")
+            or self.clean_text(ld.get("company") or "")
+            or "Unknown"
+        )
+        location_text = (
+            (job or {}).get("location")
+            or listing.get("location")
+            or self.clean_text(ld.get("location") or "")
+            or "Pakistan"
+        )
+        description_text = self.clean_text(
+            ((job or {}).get("description") or "")
+            or ld.get("description")
+            or listing.get("description")
+            or ""
+        )
+        if len(description_text) < 50:
+            return job
+        job_data: JobData = {
+            "job_id": self.generate_job_id(
+                str(title_text), str(company_text), str(location_text)
+            ),
+            "title": str(title_text),
+            "company": str(company_text),
+            "location": str(location_text),
+            "job_url": job_url,
+            "board": self.board_name,
+            "description": description_text,
+            "skills": (job or {}).get("skills") or [],
+            "posted_date": (job or {}).get("posted_date") or listing.get("posted_date"),
+            "salary": (job or {}).get("salary"),
+            "employment_type": (job or {}).get("employment_type"),
+            "experience_required": (job or {}).get("experience_required"),
+            "raw_html": html,
+        }
+        if self.validate_job_data(job_data):
+            return job_data
+        return job
+
+    def parse_from_response(
+        self,
+        response: Any,
+        listing: Optional[Dict[str, Any]] = None,
+    ) -> Optional[JobData]:
+        """Live parse with HTML / JSON-LD fallback and optional listing merge."""
+        listing = listing or {}
+        job_url = (
+            getattr(response, "url", None)
+            or listing.get("job_url")
+            or ""
+        )
+        job = self.parse_job(response) if response else None
+        if job and len((job.get("description") or "")) >= 50:
+            return self._merge_listing_fields(job, listing, job_url)
+        html = self._get_html(response)
+        fallback = self.parse_from_html(html, job_url, listing)
+        if fallback and len((fallback.get("description") or "")) >= 50:
+            return fallback
+        return job
+
+    @staticmethod
+    def _merge_listing_fields(
+        job: JobData,
+        listing: Dict[str, Any],
+        job_url: str,
+    ) -> JobData:
+        merged = dict(job)
+        if listing.get("title") and not merged.get("title"):
+            merged["title"] = listing["title"]
+        if listing.get("company") and merged.get("company") in (None, "", "Unknown"):
+            merged["company"] = listing["company"]
+        if listing.get("location") and not merged.get("location"):
+            merged["location"] = listing["location"]
+        if job_url:
+            merged["job_url"] = job_url
+        cur = (merged.get("description") or "").strip()
+        inc = (listing.get("description") or "").strip()
+        if len(inc) > len(cur):
+            merged["description"] = inc
+        return merged
     
     def _parse_card(self, card: Any) -> Optional[JobData]:
         title_link = self._css_first(card, [

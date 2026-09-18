@@ -82,7 +82,11 @@ def run_fetch(
     if parse_job:
         try:
             parser = _parser_for(board)
-            job = parser.parse_job(page) if parser else None
+            board_key = (board or "").lower()
+            if parser and board_key == "indeed":
+                job = parser.parse_from_response(page, None)
+            else:
+                job = parser.parse_job(page) if parser else None
             if job:
                 job = dict(job)
                 job.pop("raw_html", None)

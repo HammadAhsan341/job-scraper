@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime
 from typing import Any, Dict, Optional
+
+from services.posted_date import parse_posted_date
 
 _PAYLOAD_EXCLUDE = {"raw_html"}
 _PLACEHOLDERS = {"", "unknown", "untitled", "n/a", "none", "null"}
@@ -112,13 +115,23 @@ def _json_safe(value: Any) -> Any:
 def job_to_record(job: Dict[str, Any]) -> Dict[str, Any]:
     """Map an in-memory JobData dict onto the jobs table schema."""
     date_scrapped = job.get("date_scrapped") or datetime.utcnow().isoformat()
+    # Omit posted_at until Supabase has migration 013 / posted_at column (PostgREST PGRST204).
+    include_posted_at = os.getenv("JOBS_UPSERT_POSTED_AT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    posted_at_iso = None
+    if include_posted_at:
+        posted_at = parse_posted_date(job.get("posted_date"))
+        posted_at_iso = posted_at.isoformat() if posted_at else None
     raw_payload = {
         key: _json_safe(value)
         for key, value in job.items()
         if key not in _PAYLOAD_EXCLUDE
     }
 
-    return {
+    record = {
         "job_id": job["job_id"],
         "job_title": job.get("title", ""),
         "job_description": job.get("description", ""),
@@ -142,3 +155,6 @@ def job_to_record(job: Dict[str, Any]) -> Dict[str, Any]:
         "enrichment_timestamp": job.get("enrichment_timestamp"),
         "raw_payload": raw_payload,
     }
+    if include_posted_at and posted_at_iso:
+        record["posted_at"] = posted_at_iso
+    return record

@@ -124,10 +124,10 @@ def destination_job_url(response: Any = None, requested_url: str = "") -> str:
     return ""
 
 
-def jsonld_job_description(html: str) -> str:
-    """Pull JobPosting.description from JSON-LD, which guest pages often keep."""
+def _jsonld_job_posting_nodes(html: str) -> list[dict]:
     if not html:
-        return ""
+        return []
+    out: list[dict] = []
     for match in _JSONLD_SCRIPT_RE.finditer(html):
         raw = (match.group(1) or "").strip()
         if not raw:
@@ -137,7 +137,7 @@ def jsonld_job_description(html: str) -> str:
         except json.JSONDecodeError:
             continue
         nodes = data if isinstance(data, list) else [data]
-        expanded = []
+        expanded: list[Any] = []
         for node in nodes:
             if isinstance(node, dict) and node.get("@graph"):
                 graph = node["@graph"]
@@ -152,14 +152,60 @@ def jsonld_job_description(html: str) -> str:
                 types = [types]
             if "JobPosting" not in (types or []):
                 continue
-            description = node.get("description") or ""
-            if isinstance(description, dict):
-                description = description.get("@value") or ""
-            text = _TAG_RE.sub(" ", html_lib.unescape(str(description)))
-            text = " ".join(text.split()).strip()
-            if text:
-                return text
-    return ""
+            out.append(node)
+    return out
+
+
+def _jsonld_plain(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        value = value.get("@value") or value.get("name") or ""
+    text = _TAG_RE.sub(" ", html_lib.unescape(str(value)))
+    return " ".join(text.split()).strip()
+
+
+def jsonld_job_posting(html: str) -> Dict[str, str]:
+    """Extract common JobPosting fields from JSON-LD (Indeed often serves these on viewjob)."""
+    fields = {"title": "", "description": "", "company": "", "location": ""}
+    for node in _jsonld_job_posting_nodes(html):
+        if not fields["title"]:
+            fields["title"] = _jsonld_plain(node.get("title"))
+        if not fields["description"]:
+            fields["description"] = _jsonld_plain(node.get("description"))
+        if not fields["company"]:
+            org = node.get("hiringOrganization") or {}
+            if isinstance(org, dict):
+                fields["company"] = _jsonld_plain(org.get("name") or org.get("legalName"))
+            else:
+                fields["company"] = _jsonld_plain(org)
+        if not fields["location"]:
+            loc = node.get("jobLocation")
+            if isinstance(loc, list) and loc:
+                loc = loc[0]
+            if isinstance(loc, dict):
+                addr = loc.get("address") or loc
+                if isinstance(addr, dict):
+                    parts = [
+                        addr.get("addressLocality"),
+                        addr.get("addressRegion"),
+                        addr.get("addressCountry"),
+                    ]
+                    fields["location"] = ", ".join(
+                        p for p in (_jsonld_plain(x) for x in parts) if p
+                    )
+                else:
+                    fields["location"] = _jsonld_plain(loc)
+            else:
+                fields["location"] = _jsonld_plain(loc)
+        if all(fields[k] for k in ("title", "description")):
+            break
+    return fields
+
+
+def jsonld_job_description(html: str) -> str:
+    """Pull JobPosting.description from JSON-LD, which guest pages often keep."""
+    return jsonld_job_posting(html).get("description") or ""
 
 
 def is_auth_wall(response: Any = None, url: str = "") -> bool:

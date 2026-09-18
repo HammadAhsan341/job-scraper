@@ -3,6 +3,7 @@
 
 alter table if exists public.jobs
     add column if not exists posted_date text,
+    add column if not exists posted_at timestamptz,
     add column if not exists salary_raw text,
     add column if not exists salary_normalized jsonb,
     add column if not exists description_sections jsonb,

@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage
 from core.settings import get_settings
 from services.job_record import incoming_improves_stored, merge_incoming_over_stored
 from services.supabase import get_supabase_service
+from scraper.listing_persist import is_persistable_job, prepare_job_for_persist
 from scraper.spider import JobScraperSpider
 
 PERSIST_BATCH_SIZE = 100
@@ -115,11 +116,10 @@ def _persist_scraped_jobs(raw_jobs, supabase, totals, batch_size, state):
         already = bool(job_id) and supabase.is_job_processed(job_id) and stored is not None
         if not already:
             board = (job.get("board") or "").lower()
-            desc = (job.get("description") or "").strip()
-            if board in {"linkedin", "indeed"} and len(desc) < 50:
-                print(f"   Skipping {board} card without JD: {job.get('title')}")
+            if not is_persistable_job(job, board):
+                print(f"   Skipping {board} card without usable text: {job.get('title')}")
                 continue
-            new_jobs.append(job)
+            new_jobs.append(prepare_job_for_persist(job, board))
         elif incoming_improves_stored(job, stored):
             new_jobs.append(merge_incoming_over_stored(job, stored))
             refill_count += 1
@@ -191,8 +191,10 @@ def _process_single_role(role, index, total, settings, supabase, totals, batch_s
                         job_id = job.get("job_id")
                         desc = (job.get("description") or "").strip()
                         board_name = (job.get("board") or _board or "").lower()
-                        if board_name in {"linkedin", "indeed"} and len(desc) < 50:
+                        if not is_persistable_job(job, board_name):
                             continue
+                        job = prepare_job_for_persist(job, board_name)
+                        desc = (job.get("description") or "").strip()
                         key = (job_id, len(desc))
                         if not job_id or key in queued:
                             continue

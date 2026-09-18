@@ -203,6 +203,8 @@ uv run python main.py
 
 ## Deployment
 
+**Canonical CI repo (public):** [github.com/HammadAhsan341/job-scraper](https://github.com/HammadAhsan341/job-scraper) — scheduled scrapes and manual runs use this repository’s Actions workflow.
+
 The scraper is deployed via **GitHub Actions** with 8 scheduled runs per day - LinkedIn and Indeed alternate every 3 hours with each role set scraped twice. No server required.
 
 | Time (PKT) | Board    | Role Set |

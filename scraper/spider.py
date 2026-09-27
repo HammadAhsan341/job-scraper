@@ -27,7 +27,13 @@ from scraper.boards import (
 )
 from scraper.fetch_worker import worker_entry, _stealthy_fetch
 from scraper.boards.indeed_jd import jk_from_job_url
-from scraper.guest import destination_job_url, is_auth_wall, merge_listing_with_detail
+from scraper.guest import (
+    description_looks_truncated,
+    destination_job_url,
+    is_auth_wall,
+    jsonld_job_description,
+    merge_listing_with_detail,
+)
 from scraper.listing_persist import is_persistable_job, prepare_job_for_persist
 
 _board_fetch_gates: Dict[str, threading.Semaphore] = {}
@@ -493,7 +499,7 @@ class JobScraperSpider:
                 return parsed
             if not job_response:
                 return None
-            if board == "indeed" and hasattr(parser, "parse_from_response"):
+            if board in {"indeed", "linkedin"} and hasattr(parser, "parse_from_response"):
                 return parser.parse_from_response(job_response, listing)
             return parser.parse_job(job_response)
 
@@ -541,11 +547,14 @@ class JobScraperSpider:
             if not serp_resp or is_auth_wall(serp_resp, serp_url):
                 return None
             serp_job = parser.parse_serp_detail(serp_resp, job_url, listing_card)
-            if not serp_job or len((serp_job.get("description") or "")) < 50:
+            serp_desc = (serp_job or {}).get("description") or ""
+            if (
+                not serp_job
+                or len(serp_desc) < 50
+                or description_looks_truncated(serp_desc)
+            ):
                 return None
-            print(
-                f"      JD from search pane ({len(serp_job['description'])} chars)"
-            )
+            print(f"      JD from search pane ({len(serp_desc)} chars)")
             try:
                 serp_resp.parsed_job = dict(serp_job)
             except Exception:
@@ -613,19 +622,58 @@ class JobScraperSpider:
                 parsed_job=dict(job),
             )
 
+        def _attach_parsed_job(job_response, job_data) -> None:
+            if not job_response or not job_data:
+                return
+            try:
+                job_response.parsed_job = dict(job_data)
+            except Exception:
+                pass
+
         def _fetch_indeed_job_page(
             job_url: str,
             listing_card=None,
             serp_page: int = 1,
         ):
+            """SERP pane is fast; viewjob is authoritative — keep the longest JD."""
             serp = _fetch_indeed_serp_jd(job_url, listing_card, serp_page=serp_page)
-            if serp:
-                return serp
             view = _fetch_job_page(job_url)
-            if view and not is_auth_wall(view, job_url):
-                return view
+
+            best_resp = None
+            best_job = None
+            best_len = 0
+            for resp in (serp, view):
+                if not resp or is_auth_wall(resp, job_url):
+                    continue
+                job_data = _job_from_page(job_url, resp, listing_card)
+                dlen = len((job_data or {}).get("description") or "")
+                if dlen > best_len:
+                    best_len = dlen
+                    best_resp = resp
+                    best_job = job_data
+
+            desc_text = (best_job or {}).get("description") or ""
+            if best_resp and (
+                best_len < 50 or description_looks_truncated(desc_text)
+            ):
+                print("      retrying Indeed viewjob headful for full JD")
+                headful = _fetch_job_page(job_url, headless_first=False)
+                if headful and not is_auth_wall(headful, job_url):
+                    headful_job = _job_from_page(job_url, headful, listing_card)
+                    hlen = len((headful_job or {}).get("description") or "")
+                    if hlen > best_len:
+                        best_len = hlen
+                        best_resp = headful
+                        best_job = headful_job
+
+            if best_resp and best_job and best_len >= 50:
+                _attach_parsed_job(best_resp, best_job)
+                return best_resp
+
             interactive = _indeed_interactive_fetch(job_url, listing_card)
-            return interactive or view
+            if interactive:
+                return interactive
+            return best_resp or view or serp
 
         for page in range(1, max_pages + 1):
             try:
@@ -721,13 +769,39 @@ class JobScraperSpider:
 
                         # Reference scraper retries headful when the JD is missing
                         # and this is not a login bounce.
+                        html_for_jd = ""
+                        if job_response and hasattr(parser, "_get_html"):
+                            html_for_jd = parser._get_html(job_response)
+                        jd_jsonld_len = len(jsonld_job_description(html_for_jd))
+                        linkedin_short_preview = (
+                            board == "linkedin"
+                            and job_data
+                            and (
+                                description_looks_truncated(
+                                    job_data.get("description") or ""
+                                )
+                                or jd_jsonld_len > desc_len + 80
+                            )
+                        )
+                        indeed_incomplete = (
+                            board == "indeed"
+                            and job_data
+                            and (
+                                desc_len < 50
+                                or description_looks_truncated(
+                                    job_data.get("description") or ""
+                                )
+                            )
+                        )
                         if (
-                            board != "indeed"
-                            and desc_len < 50
-                            and job_response
+                            job_response
                             and not is_auth_wall(job_response, job_url)
+                            and (
+                                (board == "linkedin" and (desc_len < 50 or linkedin_short_preview))
+                                or indeed_incomplete
+                            )
                         ):
-                            print("      retrying job tab headful for JD")
+                            print("      retrying job tab headful for full JD")
                             headful = _fetch_job_page(
                                 job_url, headless_first=False
                             )
@@ -736,6 +810,7 @@ class JobScraperSpider:
                             )
                             if parsed and len(parsed.get("description") or "") > desc_len:
                                 job_data = parsed
+                                job_response = headful
                                 desc_len = len(job_data.get("description") or "")
 
                         if board == "indeed" and desc_len < 50:

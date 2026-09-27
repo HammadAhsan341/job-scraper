@@ -13,6 +13,7 @@ from scraper.boards.linkedin import LinkedInParser
 from scraper.boards.mustakbil import MustakbilParser
 from scraper.fetch_worker import _selftest_parsed_job, _selftest_quick, _selftest_sleep, _stealthy_fetch
 from scraper.guest import (
+    description_looks_truncated,
     destination_job_url,
     is_auth_wall,
     jsonld_job_description,
@@ -178,6 +179,32 @@ class TestLinkedInCards(unittest.TestCase):
         urls = parser.parse_listing(response)
         self.assertEqual(urls, ["https://www.linkedin.com/jobs/view/12345"])
         self.assertEqual(parser._listing_jobs[0]["company"], "Acme")
+
+    def test_parse_job_prefers_full_markup_over_see_more_preview(self):
+        preview = "We are hiring for a senior role with cloud experience. …see more"
+        full = (
+            "We are hiring for a senior role with cloud experience. "
+            "You will design systems, mentor engineers, and own delivery end to end. "
+            "Requirements include Python, AWS, and strong communication skills."
+        )
+        html = f"""
+        <html><body>
+        <h1 class="top-card-layout__title">Senior Engineer</h1>
+        <a class="topcard__org-name-link">Acme Corp</a>
+        <span class="topcard__flavor--bullet">Lahore, Pakistan</span>
+        <div class="description__text"><p>{preview}</p></div>
+        <div class="show-more-less-html__markup"><p>{full}</p></div>
+        </body></html>
+        """
+        parser = LinkedInParser()
+        job = parser.parse_from_html(
+            html,
+            "https://www.linkedin.com/jobs/view/999",
+        )
+        self.assertIsNotNone(job)
+        self.assertEqual(job["description"], full)
+        self.assertFalse(description_looks_truncated(full))
+        self.assertTrue(description_looks_truncated(preview))
 
 
 class TestMustakbilSearchUrl(unittest.TestCase):
@@ -360,6 +387,47 @@ class TestFetchIsolate(unittest.TestCase):
         self.assertIn("full guest", page.parsed_job["description"])
 
 
+class TestLongestJdMerge(unittest.TestCase):
+    def test_linkedin_parse_from_response_prefers_longest(self):
+        from scraper.boards.linkedin import LinkedInParser
+
+        preview = "Short preview … see more"
+        full = "A" * 800
+        html = f"""
+        <html><body>
+        <div class="description__text">{preview}</div>
+        <div class="show-more-less-html__markup"><p>{full}</p></div>
+        </body></html>
+        """
+        page = SimpleNamespace(url="https://www.linkedin.com/jobs/view/1", status=200, body=html)
+        parser = LinkedInParser()
+        job = parser.parse_from_response(page, {"title": "Engineer", "company": "Acme"})
+        self.assertIsNotNone(job)
+        self.assertGreaterEqual(len(job["description"]), 800)
+
+    def test_indeed_parse_from_response_prefers_longest(self):
+        from scraper.boards.indeed import IndeedParser
+
+        short = "Listing blurb only."
+        long_body = "Long Indeed mosaic description. " * 40
+        mosaic = f'"sanitizedJobDescription":"\\u003Cp>{long_body}\\u003C/p>"'
+        html = (
+            "<html><body>"
+            "<h1 class='jobsearch-JobInfoHeader-title'>Engineer</h1>"
+            f"<div id='jobDescriptionText'>{short}</div>"
+            f"<script>{mosaic}</script>"
+            "</body></html>"
+        )
+        page = SimpleNamespace(url="https://pk.indeed.com/viewjob?jk=abc", status=200, body=html)
+        parser = IndeedParser()
+        job = parser.parse_from_response(
+            page,
+            {"title": "Engineer", "company": "Acme", "location": "Lahore"},
+        )
+        self.assertIsNotNone(job)
+        self.assertGreater(len(job["description"]), len(short) + 200)
+
+
 class TestReferenceJobTabFetch(unittest.TestCase):
     def setUp(self):
         reset_fetch_runtime_state()
@@ -387,8 +455,22 @@ class TestReferenceJobTabFetch(unittest.TestCase):
             job_scraping_board_cooldown_seconds=0.0,
             job_scraping_max_concurrent_fetches=1,
         )
+        def fake_isolated(
+            url,
+            board,
+            headless,
+            timeout_ms,
+            network_idle,
+            hard_timeout_s,
+            worker=None,
+            parse_job=False,
+        ):
+            captured["timeout_ms"] = timeout_ms
+            captured["network_idle"] = network_idle
+            return SimpleNamespace(status=200, url=url, html_content="<html/>")
+
         with patch("scraper.spider.get_settings", return_value=settings), patch(
-            "scraper.spider._do_stealthy_fetch", side_effect=fake_fetch
+            "scraper.spider._fetch_isolated", side_effect=fake_isolated
         ):
             page = _fetch_with_scrapling(
                 "https://pk.indeed.com/viewjob?jk=1",
@@ -453,14 +535,24 @@ class TestReferenceJobTabFetch(unittest.TestCase):
             parser._listing_jobs = [dict(listing_job)]
             return [listing_job["job_url"]]
 
+        serp_miss = SimpleNamespace(
+            url="https://pk.indeed.com/jobs?vjk=abc",
+            status=200,
+            body="<html>serp</html>",
+        )
         with patch("scraper.spider._fetch_with_scrapling") as fetch:
-            fetch.side_effect = [listing_response, detail_response]
+            fetch.side_effect = [listing_response, serp_miss, detail_response]
             with patch.object(parser, "parse_listing", side_effect=fake_parse):
-                with patch.object(parser, "parse_job", return_value=None) as parse_job:
-                    with patch.object(parser, "build_search_url", return_value="https://pk.indeed.com/jobs"):
-                        jobs = spider.scrape_board(
-                            "indeed", "Software Engineer", max_pages=1, max_jobs=5
-                        )
+                with patch.object(parser, "parse_serp_detail", return_value=None):
+                    with patch.object(parser, "parse_job", return_value=None) as parse_job:
+                        with patch.object(
+                            parser,
+                            "build_search_url",
+                            return_value="https://pk.indeed.com/jobs",
+                        ):
+                            jobs = spider.scrape_board(
+                                "indeed", "Software Engineer", max_pages=1, max_jobs=5
+                            )
 
         self.assertEqual(len(jobs), 1)
         self.assertIn("live Indeed", jobs[0]["description"])
@@ -518,18 +610,34 @@ class TestReferenceJobTabFetch(unittest.TestCase):
             parser._listing_jobs = [dict(card) for card in cards]
             return [card["job_url"] for card in cards]
 
+        serp_misses = [
+            SimpleNamespace(
+                url=f"https://pk.indeed.com/jobs?vjk={card['job_id']}",
+                status=200,
+                body="<html>serp</html>",
+            )
+            for card in cards
+        ]
+        fetch_queue = [listing_response]
+        for serp, detail in zip(serp_misses, details, strict=True):
+            fetch_queue.extend([serp, detail])
         with patch("scraper.spider._fetch_with_scrapling") as fetch:
-            fetch.side_effect = [listing_response, *details]
+            fetch.side_effect = fetch_queue
             with patch.object(parser, "parse_listing", side_effect=fake_parse):
-                with patch.object(parser, "parse_job", return_value=None):
-                    with patch.object(parser, "build_search_url", return_value="https://pk.indeed.com/jobs"):
-                        spider.scrape_board(
-                            "indeed",
-                            "Software Engineer",
-                            max_pages=1,
-                            max_jobs=5,
-                            on_jobs=lambda batch: emitted.append(list(batch)),
-                        )
+                with patch.object(parser, "parse_serp_detail", return_value=None):
+                    with patch.object(parser, "parse_job", return_value=None):
+                        with patch.object(
+                            parser,
+                            "build_search_url",
+                            return_value="https://pk.indeed.com/jobs",
+                        ):
+                            spider.scrape_board(
+                                "indeed",
+                                "Software Engineer",
+                                max_pages=1,
+                                max_jobs=5,
+                                on_jobs=lambda batch: emitted.append(list(batch)),
+                            )
 
         self.assertEqual(len(emitted), 2)
         self.assertEqual([len(batch) for batch in emitted], [1, 1])

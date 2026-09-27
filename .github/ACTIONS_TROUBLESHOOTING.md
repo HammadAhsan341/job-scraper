@@ -4,17 +4,17 @@ If **Daily Job Scrape** finishes in **~2–5 seconds** with an empty job log and
 
 ## Required repository secrets
 
-| Secret | Required |
-|--------|----------|
-| `SUPABASE_URL` | Yes |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes |
-| `PERMITTED_ROLES_1` | Yes (JSON array) |
-| `PERMITTED_ROLES_2` | Yes (JSON array) |
-| `JOB_SCRAPING_MAX_PAGES_PER_BOARD` | Yes |
-| `JOB_SCRAPING_MAX_JOBS_PER_BOARD` | Yes |
-| `JOB_SCRAPING_DOWNLOAD_DELAY` | Yes |
-| `JOB_STALE_AFTER_DAYS` | Yes |
-| `JOB_SCRAPING_RETRY_BACKOFF_SECONDS` | Yes |
+| Secret                               | Required         |
+| ------------------------------------ | ---------------- |
+| `SUPABASE_URL`                       | Yes              |
+| `SUPABASE_SERVICE_ROLE_KEY`          | Yes              |
+| `PERMITTED_ROLES_1`                  | Yes (JSON array) |
+| `PERMITTED_ROLES_2`                  | Yes (JSON array) |
+| `JOB_SCRAPING_MAX_PAGES_PER_BOARD`   | Yes              |
+| `JOB_SCRAPING_MAX_JOBS_PER_BOARD`    | Yes              |
+| `JOB_SCRAPING_DOWNLOAD_DELAY`        | Yes              |
+| `JOB_STALE_AFTER_DAYS`               | Yes              |
+| `JOB_SCRAPING_RETRY_BACKOFF_SECONDS` | Yes              |
 
 Preflight runs `scripts/validate_ci_env.py` before scraping.
 

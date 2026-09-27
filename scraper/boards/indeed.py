@@ -6,7 +6,7 @@ Indeed is a global job search engine with Pakistan listings.
 
 from typing import Optional, List, Any, Dict
 from core.state import JobData
-from scraper.guest import jsonld_job_description, jsonld_job_posting
+from scraper.guest import jsonld_job_description, jsonld_job_posting, pick_longer_description_job
 from scraper.boards.indeed_jd import extract_description_multi
 from .base import BaseJobParser
 
@@ -358,13 +358,12 @@ class IndeedParser(BaseJobParser):
             or ""
         )
         job = self.parse_job(response) if response else None
-        if job and len((job.get("description") or "")) >= 50:
-            return self._merge_listing_fields(job, listing, job_url)
         html = self._get_html(response)
         fallback = self.parse_from_html(html, job_url, listing)
-        if fallback and len((fallback.get("description") or "")) >= 50:
-            return fallback
-        return job
+        best = pick_longer_description_job(job, fallback)
+        if best and len((best.get("description") or "")) >= 50:
+            return self._merge_listing_fields(best, listing, job_url)
+        return best or job
 
     @staticmethod
     def _merge_listing_fields(

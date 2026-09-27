@@ -14,3 +14,8 @@ dependencies = [
     "scrapling[fetchers]>=0.4.7",
     "supabase>=2.30.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

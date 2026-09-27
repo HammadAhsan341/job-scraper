@@ -165,47 +165,80 @@ def _jsonld_plain(value: Any) -> str:
     return " ".join(text.split()).strip()
 
 
+def jsonld_job_descriptions(html: str) -> list[str]:
+    """All JobPosting.description values from JSON-LD (longest is usually the full JD)."""
+    out: list[str] = []
+    for node in _jsonld_job_posting_nodes(html):
+        desc = _jsonld_plain(node.get("description"))
+        if len(desc) >= 20:
+            out.append(desc)
+    return out
+
+
 def jsonld_job_posting(html: str) -> Dict[str, str]:
     """Extract common JobPosting fields from JSON-LD (Indeed often serves these on viewjob)."""
     fields = {"title": "", "description": "", "company": "", "location": ""}
     for node in _jsonld_job_posting_nodes(html):
-        if not fields["title"]:
-            fields["title"] = _jsonld_plain(node.get("title"))
-        if not fields["description"]:
-            fields["description"] = _jsonld_plain(node.get("description"))
-        if not fields["company"]:
-            org = node.get("hiringOrganization") or {}
-            if isinstance(org, dict):
-                fields["company"] = _jsonld_plain(org.get("name") or org.get("legalName"))
+        title = _jsonld_plain(node.get("title"))
+        if len(title) > len(fields["title"]):
+            fields["title"] = title
+        desc = _jsonld_plain(node.get("description"))
+        if len(desc) > len(fields["description"]):
+            fields["description"] = desc
+        org = node.get("hiringOrganization") or {}
+        if isinstance(org, dict):
+            company = _jsonld_plain(org.get("name") or org.get("legalName"))
+        else:
+            company = _jsonld_plain(org)
+        if len(company) > len(fields["company"]):
+            fields["company"] = company
+        loc = node.get("jobLocation")
+        if isinstance(loc, list) and loc:
+            loc = loc[0]
+        location = ""
+        if isinstance(loc, dict):
+            addr = loc.get("address") or loc
+            if isinstance(addr, dict):
+                parts = [
+                    addr.get("addressLocality"),
+                    addr.get("addressRegion"),
+                    addr.get("addressCountry"),
+                ]
+                location = ", ".join(
+                    p for p in (_jsonld_plain(x) for x in parts) if p
+                )
             else:
-                fields["company"] = _jsonld_plain(org)
-        if not fields["location"]:
-            loc = node.get("jobLocation")
-            if isinstance(loc, list) and loc:
-                loc = loc[0]
-            if isinstance(loc, dict):
-                addr = loc.get("address") or loc
-                if isinstance(addr, dict):
-                    parts = [
-                        addr.get("addressLocality"),
-                        addr.get("addressRegion"),
-                        addr.get("addressCountry"),
-                    ]
-                    fields["location"] = ", ".join(
-                        p for p in (_jsonld_plain(x) for x in parts) if p
-                    )
-                else:
-                    fields["location"] = _jsonld_plain(loc)
-            else:
-                fields["location"] = _jsonld_plain(loc)
-        if all(fields[k] for k in ("title", "description")):
-            break
+                location = _jsonld_plain(loc)
+        else:
+            location = _jsonld_plain(loc)
+        if len(location) > len(fields["location"]):
+            fields["location"] = location
     return fields
 
 
 def jsonld_job_description(html: str) -> str:
     """Pull JobPosting.description from JSON-LD, which guest pages often keep."""
     return jsonld_job_posting(html).get("description") or ""
+
+
+_TRUNCATED_TAIL_RE = re.compile(
+    r"(?:\.{3}|…|\.\.\.)\s*(?:see|show)\s+more\b|\b(?:see|show)\s+more\s*$",
+    re.IGNORECASE,
+)
+
+
+def description_looks_truncated(text: str) -> bool:
+    """True when visible text looks like LinkedIn/Indeed preview before 'See more'."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    tail = t[-160:]
+    if _TRUNCATED_TAIL_RE.search(tail):
+        return True
+    lower = t.lower()
+    if len(t) < 600 and ("see more" in lower or "show more" in lower):
+        return True
+    return False
 
 
 def is_auth_wall(response: Any = None, url: str = "") -> bool:
@@ -215,6 +248,14 @@ def is_auth_wall(response: Any = None, url: str = "") -> bool:
         return True
     html = _response_html(response).lower()
     return any(marker in html for marker in AUTH_HTML_MARKERS)
+
+
+def pick_longer_description_job(*jobs: Optional[Dict]) -> Optional[Dict]:
+    """Return the job dict with the longest description (for multi-parse merge)."""
+    valid = [j for j in jobs if j]
+    if not valid:
+        return None
+    return max(valid, key=lambda j: len((j.get("description") or "")))
 
 
 def merge_listing_with_detail(listing: Dict, detail: Optional[Dict]) -> Dict:

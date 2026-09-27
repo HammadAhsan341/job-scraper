@@ -83,7 +83,7 @@ def run_fetch(
         try:
             parser = _parser_for(board)
             board_key = (board or "").lower()
-            if parser and board_key == "indeed":
+            if parser and board_key in {"indeed", "linkedin"}:
                 job = parser.parse_from_response(page, None)
             else:
                 job = parser.parse_job(page) if parser else None

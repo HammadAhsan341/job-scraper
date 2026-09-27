@@ -239,7 +239,7 @@ The scraper is deployed via **GitHub Actions** with 8 scheduled runs per day - L
 
 All of the secrets above are **required** except `JOB_SCRAPING_WORKERS` and `JOB_SCRAPING_MAX_CONCURRENT_FETCHES` (the workflow defaults those to `2` and `1` on GitHub).
 
-**Indeed full job descriptions:** CI uses the search-pane (`vjk`) + mosaic JSON extractor (no captcha UI). Keep `JOB_SCRAPING_FETCH_TIMEOUT_SECONDS=0` and `JOB_SCRAPING_INDEED_INTERACTIVE=false` in Actions.
+**Full job descriptions (LinkedIn + Indeed):** The spider fetches Indeed **SERP pane and viewjob**, keeps the **longest** JD (mosaic JSON, DOM, JSON-LD), rejects truncated “see more” previews, and retries **headful** when needed. LinkedIn uses `linkedin_jd.py` to prefer hidden `show-more-less-html__markup` over short previews. Keep `JOB_SCRAPING_FETCH_TIMEOUT_SECONDS=0` and `JOB_SCRAPING_INDEED_INTERACTIVE=false` in Actions.
 
 If a workflow run fails in a few seconds with **no log steps**, check **Settings → Billing → Actions** (private repos need available minutes) and that no other `Daily Job Scrape` run is stuck queued.
 
@@ -282,7 +282,9 @@ scraper/
   boards/
     base.py                <- BaseJobParser ABC with shared utilities
     linkedin.py            <- LinkedIn parser
+    linkedin_jd.py         <- LinkedIn full JD (markup + JSON-LD)
     indeed.py              <- Indeed parser
+    indeed_jd.py           <- Indeed mosaic / DOM / JSON-LD JD extraction
 pipeline/
   enricher.py              <- JobEnricher: description cleaning, skill/experience/salary extraction
   skill_list.py            <- flatten Excel skill grid (columns B–K)

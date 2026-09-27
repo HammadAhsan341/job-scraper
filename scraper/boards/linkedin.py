@@ -4,10 +4,28 @@ LinkedIn job parser using Scrapling's adaptive parsing.
 Handles LinkedIn's dynamic content and anti-bot protection.
 """
 
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from core.state import JobData
-from scraper.guest import jsonld_job_description
+from scraper.boards.linkedin_jd import extract_description_multi
+from scraper.guest import jsonld_job_posting, merge_listing_with_detail, pick_longer_description_job
 from .base import BaseJobParser
+
+
+class _HtmlResponse:
+    """Minimal Scrapling-like wrapper for parsing saved HTML."""
+
+    def __init__(self, html: str, url: str = ""):
+        self.url = url or ""
+        self.body = html or ""
+        self.html_content = self.body
+        self._selector = None
+
+    def css(self, selector: str):
+        if self._selector is None:
+            from scrapling.parser import Selector
+
+            self._selector = Selector(content=self.body, url=self.url)
+        return self._selector.css(selector)
 
 
 class LinkedInParser(BaseJobParser):
@@ -81,23 +99,9 @@ class LinkedInParser(BaseJobParser):
             
             location_text = self.clean_text(self._get_text(location)) if location else "Pakistan"
             
-            # Extract description (guest pages use show-more-less + JSON-LD)
-            description = self._css_first(response, [
-                "div.description__text",
-                ".jobs-description-content__text",
-                ".jobs-description__content",
-                "div.show-more-less-html__markup",
-                "div[class*='show-more-less-html']",
-                "section.description",
-            ])
-            
-            description_text = ""
-            if description:
-                description_text = self.clean_text(self._get_text(description))
-            if len(description_text) < 50:
-                description_text = self.clean_text(
-                    jsonld_job_description(self._get_html(response))
-                ) or description_text
+            html = self._get_html(response)
+            description_text, _src = extract_description_multi(html, response)
+            description_text = self.clean_text(description_text)
             
             if not description_text or len(description_text) < 50:
                 print(f"LinkedIn: Description too short at {response.url}")
@@ -141,7 +145,7 @@ class LinkedInParser(BaseJobParser):
                 "salary": None,  # Rarely shown on LinkedIn Pakistan
                 "employment_type": employment_type,
                 "experience_required": None,  # Could extract from description
-                "raw_html": self._get_html(response)
+                "raw_html": html
             }
             
             if self.validate_job_data(job_data):
@@ -152,6 +156,88 @@ class LinkedInParser(BaseJobParser):
         except Exception as e:
             print(f"LinkedIn parse error: {e}")
             return None
+
+    def parse_from_html(
+        self,
+        html: str,
+        job_url: str,
+        listing: Optional[Dict[str, Any]] = None,
+    ) -> Optional[JobData]:
+        """Re-parse stored HTML when the live DOM pick was a short preview."""
+        if not html or not job_url:
+            return None
+        listing = listing or {}
+        page = _HtmlResponse(html, job_url)
+        job = self.parse_job(page)
+        multi, _ = extract_description_multi(html, page)
+        multi = self.clean_text(multi)
+        if job and len(multi) > len((job.get("description") or "")):
+            job = dict(job)
+            job["description"] = multi
+        if job and len((job.get("description") or "")) >= 50:
+            return merge_listing_with_detail(listing, job) if listing else job
+        ld = jsonld_job_posting(html)
+        title_text = (
+            (job or {}).get("title")
+            or listing.get("title")
+            or self.clean_text(ld.get("title") or "")
+        )
+        company_text = (
+            (job or {}).get("company")
+            or listing.get("company")
+            or self.clean_text(ld.get("company") or "")
+            or "Unknown"
+        )
+        location_text = (
+            (job or {}).get("location")
+            or listing.get("location")
+            or self.clean_text(ld.get("location") or "")
+            or "Pakistan"
+        )
+        description_text = self.clean_text(
+            multi
+            or ((job or {}).get("description") or "")
+            or ld.get("description")
+            or ""
+        )
+        if len(description_text) < 50:
+            return job
+        job_data: JobData = {
+            "job_id": self.generate_job_id(
+                str(title_text), str(company_text), str(location_text)
+            ),
+            "title": str(title_text),
+            "company": str(company_text),
+            "location": str(location_text),
+            "job_url": job_url,
+            "board": self.board_name,
+            "description": description_text,
+            "skills": (job or {}).get("skills") or [],
+            "posted_date": (job or {}).get("posted_date") or listing.get("posted_date"),
+            "salary": (job or {}).get("salary"),
+            "employment_type": (job or {}).get("employment_type"),
+            "experience_required": (job or {}).get("experience_required"),
+            "raw_html": html,
+        }
+        if self.validate_job_data(job_data):
+            return merge_listing_with_detail(listing, job_data) if listing else job_data
+        return job
+
+    def parse_from_response(
+        self,
+        response: Any,
+        listing: Optional[Dict[str, Any]] = None,
+    ) -> Optional[JobData]:
+        """Live parse; always prefer the longest JD source on the page."""
+        listing = listing or {}
+        job_url = getattr(response, "url", None) or listing.get("job_url") or ""
+        html = self._get_html(response)
+        job = self.parse_job(response)
+        fallback = self.parse_from_html(html, job_url, listing)
+        best = pick_longer_description_job(job, fallback)
+        if best and len((best.get("description") or "")) >= 50:
+            return merge_listing_with_detail(listing, best) if listing else best
+        return best or job
     
     @staticmethod
     def guest_job_url(href: str) -> str:

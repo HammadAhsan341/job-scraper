@@ -14,6 +14,14 @@ _MARKUP_BLOCK_RE = re.compile(
     r'<div[^>]*class="[^"]*show-more-less-html__markup[^"]*"[^>]*>(.*?)</div>',
     re.IGNORECASE | re.DOTALL,
 )
+_EMBEDDED_JSON_DESC_RE = re.compile(
+    r'"(?:description|jobDescription|job_description)"\s*:\s*"((?:\\.|[^"\\])*)"',
+    re.IGNORECASE,
+)
+_ARTICLE_BODY_RE = re.compile(
+    r'"articleBody"\s*:\s*"((?:\\.|[^"\\])*)"',
+    re.IGNORECASE,
+)
 
 
 def _clean_html_text(raw: str) -> str:
@@ -42,6 +50,24 @@ def _text_from_nodes(response: Any, selector: str) -> List[str]:
         cleaned = _WS_RE.sub(" ", text).strip()
         if len(cleaned) >= 20:
             out.append(cleaned)
+    return out
+
+
+def embedded_json_descriptions(html: str) -> List[str]:
+    """LinkedIn SPA bootstraps often embed escaped JD strings in inline JSON."""
+    if not html:
+        return []
+    out: List[str] = []
+    for pattern in (_EMBEDDED_JSON_DESC_RE, _ARTICLE_BODY_RE):
+        for match in pattern.finditer(html):
+            raw = match.group(1) or ""
+            try:
+                decoded = bytes(raw, "utf-8").decode("unicode_escape")
+            except (UnicodeDecodeError, ValueError):
+                decoded = raw.replace("\\n", "\n").replace('\\"', '"')
+            text = _clean_html_text(decoded)
+            if len(text) >= 50:
+                out.append(text)
     return out
 
 
@@ -79,6 +105,16 @@ def extract_description_multi(html: str, response: Any) -> Tuple[str, str]:
 
     for text in markup_descriptions_from_html(html):
         candidates.append(("markup_html", text))
+
+    for text in embedded_json_descriptions(html):
+        candidates.append(("embedded_json", text))
+
+    for text in _text_from_nodes(
+        response,
+        "div.jobs-box__html-content, div.jobs-description__content, "
+        "article.jobs-description__container",
+    ):
+        candidates.append(("jobs_box", text))
 
     for text in jsonld_job_descriptions(html):
         candidates.append(("jsonld", text))

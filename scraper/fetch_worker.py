@@ -37,6 +37,8 @@ def _stealthy_fetch(
     headless: bool,
     timeout_ms: int,
     network_idle: bool,
+    *,
+    job_detail: bool = False,
 ):
     """Same kwargs as the reference scraper; omit timeout when it is 0."""
     from scrapling import StealthyFetcher
@@ -49,6 +51,15 @@ def _stealthy_fetch(
     }
     if timeout_ms and timeout_ms > 0:
         kwargs["timeout"] = timeout_ms
+    if job_detail and (board or "").lower() == "linkedin":
+        from scraper.linkedin_page import expand_linkedin_job_description
+
+        kwargs["page_action"] = expand_linkedin_job_description
+        kwargs["wait_selector"] = (
+            "div.show-more-less-html__markup, div.description__text, "
+            ".jobs-description-content__text"
+        )
+        kwargs["wait_selector_state"] = "attached"
     return StealthyFetcher.fetch(url, **kwargs)
 
 
@@ -67,7 +78,9 @@ def run_fetch(
     scrapling_log.setLevel(logging.CRITICAL)
     scrapling_log.propagate = False
 
-    page = _stealthy_fetch(url, board, headless, timeout_ms, network_idle)
+    page = _stealthy_fetch(
+        url, board, headless, timeout_ms, network_idle, job_detail=parse_job
+    )
     if page is None:
         return {"error": "Scrapling returned empty response"}
 

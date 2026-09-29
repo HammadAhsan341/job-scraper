@@ -166,8 +166,16 @@ def _do_stealthy_fetch(
     headless: bool,
     timeout_ms: int,
     network_idle: bool,
+    job_detail: bool = False,
 ):
-    return _stealthy_fetch(url, board, headless, timeout_ms, network_idle)
+    return _stealthy_fetch(
+        url,
+        board,
+        headless,
+        timeout_ms,
+        network_idle,
+        job_detail=job_detail,
+    )
 
 
 def _fetch_isolated(
@@ -261,7 +269,7 @@ def _fetch_once(
             hard_timeout_s = detail_hard
 
     board_key = (board or "").lower()
-    if job_detail and board_key == "indeed":
+    if job_detail and board_key in {"indeed", "linkedin"}:
         isolate = True
         if hard_timeout_s <= 0:
             hard_timeout_s = 180.0
@@ -308,6 +316,7 @@ def _fetch_once(
                 headless,
                 timeout_ms,
                 idle,
+                job_detail,
             )
             try:
                 response = future.result(timeout=wait_s)
@@ -316,7 +325,9 @@ def _fetch_once(
                 _note_board_timeout(board)
                 return None
         else:
-            response = _do_stealthy_fetch(url, board, headless, timeout_ms, idle)
+            response = _do_stealthy_fetch(
+                url, board, headless, timeout_ms, idle, job_detail
+            )
 
         if response is None:
             return None
@@ -505,7 +516,8 @@ class JobScraperSpider:
 
         def _fetch_job_page(job_url: str, headless_first: Optional[bool] = None):
             if headless_first is None:
-                headless_first = board != "indeed"
+                # Guest LinkedIn/Indeed JD pages render more completely headful.
+                headless_first = board not in {"indeed", "linkedin"}
 
             def _load(url: str, headless: bool):
                 return _fetch(
@@ -777,7 +789,8 @@ class JobScraperSpider:
                             board == "linkedin"
                             and job_data
                             and (
-                                description_looks_truncated(
+                                desc_len < 400
+                                or description_looks_truncated(
                                     job_data.get("description") or ""
                                 )
                                 or jd_jsonld_len > desc_len + 80

@@ -204,6 +204,18 @@ class JobEnricher:
         # Default: technical
         return "technical"
     
+    def _skill_patterns(self) -> List[Tuple[str, "re.Pattern[str]"]]:
+        # \b cannot anchor next to +, # or . so "C++", "C#" and ".NET" never
+        # matched; custom lookarounds treat those characters as part of a token.
+        cached = getattr(self, "_compiled_skills", None)
+        if cached is None:
+            cached = [
+                (skill, re.compile(r"(?<![\w+#.])" + re.escape(skill.lower()) + r"(?![\w+#])"))
+                for skill in self.skill_list
+            ]
+            self._compiled_skills = cached
+        return cached
+
     def extract_skills(self, description: str, title: str, existing_skills: List[str] = None) -> Dict[str, List[str]]:
         """
         Extract and categorize skills from description and existing skills list.
@@ -224,13 +236,8 @@ class JobEnricher:
             all_skills.update(existing_skills)
         
         # Search description for skills from master list
-        for skill in self.skill_list:
-            skill_lower = skill.lower()
-            
-            # Word boundary matching to avoid false positives
-            pattern = r'\b' + re.escape(skill_lower) + r'\b'
-            
-            if re.search(pattern, desc_lower):
+        for skill, pattern in self._skill_patterns():
+            if pattern.search(desc_lower):
                 all_skills.add(skill)
         
         # Categorize all found skills
@@ -342,26 +349,24 @@ class JobEnricher:
         
         # Extract numbers
         # Handle formats: "80,000 - 120,000", "80k - 120k", "$1500-2000"
-        numbers = re.findall(r'[\d,]+(?:\.\d+)?', salary)
-        
+        # The k suffix applies per number: a plain 'k' anywhere in the string
+        # also matched "pkr" and "week" and multiplied every salary by 1000.
+        numbers = re.findall(r'(\d[\d,]*(?:\.\d+)?)\s*(k)?(?![a-z])', salary, re.IGNORECASE)
+
         if not numbers:
             return None
-        
+
         # Parse amounts
         amounts = []
-        for num_str in numbers:
-            # Remove commas
+        for num_str, thousands in numbers:
             num_str = num_str.replace(',', '')
             try:
                 amount = float(num_str)
-                
-                # Handle k (thousands)
-                if 'k' in salary.lower():
-                    amount *= 1000
-                
-                amounts.append(int(amount))
             except ValueError:
                 continue
+            if thousands:
+                amount *= 1000
+            amounts.append(int(amount))
         
         if not amounts:
             return None
@@ -372,10 +377,15 @@ class JobEnricher:
         
         # Detect period
         period = "month"  # Default
-        if any(keyword in salary.lower() for keyword in ["annual", "yearly", "per year", "p.a."]):
+        salary_lower = salary.lower()
+        if any(keyword in salary_lower for keyword in ["annual", "yearly", "per year", "/year", "p.a."]):
             period = "year"
-        elif any(keyword in salary.lower() for keyword in ["monthly", "per month", "/month"]):
+        elif any(keyword in salary_lower for keyword in ["monthly", "per month", "/month"]):
             period = "month"
+        elif any(keyword in salary_lower for keyword in ["weekly", "per week", "/week"]):
+            period = "week"
+        elif any(keyword in salary_lower for keyword in ["hourly", "per hour", "/hour", "/hr"]):
+            period = "hour"
         
         return {
             "currency": currency,
@@ -425,9 +435,6 @@ class JobEnricher:
         Returns:
             Job type string or None
         """
-        # Combine sources
-        text = f"{employment_type or ''} {description}".lower()
-        
         # Job type patterns (ordered by priority)
         job_type_patterns = {
             "Internship": r"\b(?:intern|internship|intern position)\b",
@@ -435,10 +442,13 @@ class JobEnricher:
             "Part-time": r"\b(?:part-time|part time|parttime)\b",
             "Full-time": r"\b(?:full-time|full time|fulltime|permanent)\b"
         }
-        
-        for job_type, pattern in job_type_patterns.items():
-            if re.search(pattern, text):
-                return job_type
+
+        # The board's own field wins; prose like "Contract type: Permanent"
+        # would otherwise override a structured "Full-time".
+        for text in ((employment_type or "").lower(), (description or "").lower()):
+            for job_type, pattern in job_type_patterns.items():
+                if text and re.search(pattern, text):
+                    return job_type
         
         # Default to Full-time if no match found (most common)
         return "Full-time"

@@ -98,37 +98,43 @@ def _persist_scraped_jobs(raw_jobs, supabase, totals, batch_size, state):
     print(f"   Raw jobs: {len(raw_jobs)}")
 
     job_ids = [job.get("job_id") for job in raw_jobs if job.get("job_id")]
-    stored_by_id: dict = {}
-    getter = getattr(supabase, "get_jobs_by_ids", None)
-    if callable(getter):
-        fetched = getter(job_ids)
-        if isinstance(fetched, dict):
-            stored_by_id = fetched
+    # Both lookups raise on failure. A partial answer would make stored jobs
+    # look new, and the upsert would overwrite their full JDs with listing cards.
+    stored_by_id = supabase.get_jobs_by_ids(job_ids)
+    processed_ids = supabase.get_processed_ids(list(stored_by_id))
 
     new_jobs = []
     refill_count = 0
     duplicate_count = 0
+    unchanged_ids = []
     for job in raw_jobs:
         job_id = job.get("job_id")
         stored = stored_by_id.get(job_id) if job_id else None
         # processed_jobs alone is not enough: deleting jobs rows leaves those
         # IDs marked, and the next scrape would skip forever with an empty table.
-        already = bool(job_id) and supabase.is_job_processed(job_id) and stored is not None
+        already = stored is not None and job_id in processed_ids
         if not already:
             board = (job.get("board") or "").lower()
             if not is_persistable_job(job, board):
                 print(f"   Skipping {board} card without usable text: {job.get('title')}")
                 continue
-            new_jobs.append(prepare_job_for_persist(job, board))
+            job = prepare_job_for_persist(job, board)
+            # A stored row without a processed mark still holds real data:
+            # merge over it rather than replacing it.
+            new_jobs.append(merge_incoming_over_stored(job, stored) if stored else job)
         elif incoming_improves_stored(job, stored):
             new_jobs.append(merge_incoming_over_stored(job, stored))
             refill_count += 1
         else:
             duplicate_count += 1
+            unchanged_ids.append(job_id)
 
     print(f"   New jobs: {len(new_jobs) - refill_count}")
     print(f"   Backfilled missing fields: {refill_count}")
     print(f"   Duplicates filtered: {duplicate_count}")
+
+    # Seen again: keeps live postings out of the stale-job cleanup.
+    supabase.touch_jobs(unchanged_ids)
 
     if not new_jobs:
         return 0
@@ -137,23 +143,23 @@ def _persist_scraped_jobs(raw_jobs, supabase, totals, batch_size, state):
     enrich_input["raw_job_list"] = new_jobs
     enrich_input["scraping_status"] = "completed"
     enrich_result = job_enricher_node(enrich_input)
+    if enrich_result.get("error"):
+        # Do not upsert and mark processed half-enriched rows: they would never
+        # be retried. Raising lets the caller requeue the batch.
+        raise RuntimeError(f"enrichment failed: {enrich_result['error']}")
     enriched_jobs = enrich_result.get("raw_job_list", new_jobs)
     totals.add_enriched(len(enriched_jobs))
     print(f"   Enriched jobs: {len(enriched_jobs)}")
 
     affected = 0
-    if enriched_jobs:
-        for batch in _batched(enriched_jobs, batch_size):
-            written = int(supabase.bulk_insert_jobs(batch) or 0)
-            affected += written
-            if written:
-                for job in batch:
-                    job_id = job.get("job_id")
-                    if job_id:
-                        supabase.mark_job_processed(job_id)
-            print(f"   DB upsert batch: {written} jobs")
-        totals.add_db_upserts(affected)
-        print(f"   DB upserts: {affected}")
+    for batch in _batched(enriched_jobs, batch_size):
+        written = int(supabase.bulk_insert_jobs(batch) or 0)
+        affected += written
+        if written:
+            supabase.mark_jobs_processed([job.get("job_id") for job in batch])
+        print(f"   DB upsert batch: {written} jobs")
+    totals.add_db_upserts(affected)
+    print(f"   DB upserts: {affected}")
     return affected
 
 
@@ -166,8 +172,6 @@ def _process_single_role(role, index, total, settings, supabase, totals, batch_s
     print(f"\n[{index}/{total}] Role: {role}")
     print("-" * 60)
 
-    spider = JobScraperSpider()
-
     state: AgentState = {
         "messages": [HumanMessage(content=f"Find {role} jobs")],
         "user_id": "bulk_scraper_admin",
@@ -179,7 +183,9 @@ def _process_single_role(role, index, total, settings, supabase, totals, batch_s
         "retry_count": 0,
     }
 
+    failed_boards = []
     try:
+        spider = JobScraperSpider()
         for board in settings.job_scraping_boards:
             print(f"   Board: {board}")
             try:
@@ -201,22 +207,27 @@ def _process_single_role(role, index, total, settings, supabase, totals, batch_s
                         queued.add(key)
                         buffer.append(job)
 
+                def _persist_chunk(chunk, label):
+                    print(f"   Persisting {label} ({len(chunk)} jobs)")
+                    try:
+                        _persist_scraped_jobs(chunk, supabase, totals, batch_size, state)
+                    except Exception:
+                        # The keys are already in `queued`, so a dropped chunk
+                        # would never be offered again: put it back for the
+                        # next flush and let the caller see the failure.
+                        buffer[:0] = chunk
+                        raise
+
                 def persist(raw_jobs, _board=board, flush=False):
                     _queue_jobs(raw_jobs, _board)
                     while len(buffer) >= batch_size:
                         chunk = buffer[:batch_size]
                         del buffer[:batch_size]
-                        print(f"   Persisting {_board} batch ({len(chunk)} jobs)")
-                        _persist_scraped_jobs(
-                            chunk, supabase, totals, batch_size, state
-                        )
+                        _persist_chunk(chunk, f"{_board} batch")
                     if flush and buffer:
                         leftover = list(buffer)
                         buffer.clear()
-                        print(f"   Persisting {_board} leftover ({len(leftover)} jobs)")
-                        _persist_scraped_jobs(
-                            leftover, supabase, totals, batch_size, state
-                        )
+                        _persist_chunk(leftover, f"{_board} leftover")
 
                 raw_jobs = spider.scrape_board(
                     board=board,
@@ -229,7 +240,12 @@ def _process_single_role(role, index, total, settings, supabase, totals, batch_s
                 persist(raw_jobs, flush=True)
             except Exception as board_exc:
                 print(f"   Board {board} failed: {board_exc}")
+                failed_boards.append(board)
                 continue
+        if failed_boards and len(failed_boards) == len(settings.job_scraping_boards):
+            # Every board failed: count the role as failed so the retry pass
+            # and the summary see it (previously this path always returned True).
+            raise RuntimeError(f"all boards failed: {', '.join(failed_boards)}")
         return True
 
     except Exception as exc:

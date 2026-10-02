@@ -15,6 +15,9 @@ _RELATIVE = re.compile(
 )
 
 
+_PREFIX = re.compile(r"^(?:employer\s+active|reposted|posted|active)\s+", re.IGNORECASE)
+
+
 def _utc_now(now: datetime | None) -> datetime:
     if now is None:
         return datetime.now(timezone.utc)
@@ -50,8 +53,10 @@ def parse_posted_date(value: str | None, *, now: datetime | None = None) -> date
     if iso is not None:
         return iso
 
-    lower = raw.lower()
-    if lower in {"just now", "today", "recently"}:
+    # Boards prefix the relative age ("Posted 2 days ago", "Active 3 days ago",
+    # "Employer active 5 days ago"); strip it so the relative parse can match.
+    lower = _PREFIX.sub("", raw.lower()).strip()
+    if lower in {"just now", "just posted", "today", "recently"}:
         return _utc_now(now)
     if lower == "yesterday":
         return _utc_now(now) - timedelta(days=1)
@@ -75,5 +80,11 @@ def parse_posted_date(value: str | None, *, now: datetime | None = None) -> date
         else:
             delta = timedelta(days=amount)
         return _utc_now(now) - delta
+
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y"):
+        try:
+            return datetime.strptime(raw.strip(), fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
 
     return None

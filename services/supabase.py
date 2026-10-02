@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import httpx
 from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
@@ -142,12 +143,20 @@ class SupabaseService:
         if not jobs:
             return 0
         
-        records = []
+        by_id: Dict[str, Dict] = {}
         for job in jobs:
             try:
-                records.append(job_to_record(job))
+                record = job_to_record(job)
             except Exception as exc:
                 print(f"Skipping unmappable job {job.get('job_id')}: {exc}")
+                continue
+            # Postgres rejects an upsert that touches the same key twice
+            # ("cannot affect row a second time"), which pushed whole batches
+            # into the slow row-by-row path; keep the longest description.
+            prev = by_id.get(record["job_id"])
+            if prev is None or len(record.get("job_description") or "") > len(prev.get("job_description") or ""):
+                by_id[record["job_id"]] = record
+        records = list(by_id.values())
         if not records:
             return 0
 
@@ -185,6 +194,7 @@ class SupabaseService:
                 response = (
                     self.client.table("processed_jobs")
                     .select("job_id")
+                    .order("job_id")
                     .range(offset, offset + 499)
                     .execute()
                 )
@@ -203,34 +213,66 @@ class SupabaseService:
             if deleted:
                 print(f"Cleared {deleted} processed_jobs with no matching jobs row")
             return deleted
-        except APIError as e:
+        except (APIError, httpx.HTTPError) as e:
+            # Abort the sweep: a failed lookup must not read as "orphan".
             print(f"Failed to clear orphan processed_jobs: {e}")
             return deleted
 
     def get_jobs_by_ids(self, job_ids: List[str]) -> Dict[str, Dict]:
-        """Return stored job rows keyed by job_id (for empty-JD backfill)."""
+        """Return stored job rows keyed by job_id (for empty-JD backfill).
+
+        Raises on failure. A partial result would make existing jobs look new
+        (overwriting full JDs with listing cards) and look orphaned.
+        """
         ids = [job_id for job_id in job_ids if job_id]
         if not ids:
             return {}
         found: Dict[str, Dict] = {}
-        try:
-            for i in range(0, len(ids), 100):
-                chunk = ids[i:i + 100]
-                response = (
-                    self.client.table("jobs")
-                    .select(
-                        "job_id,job_description,company,location,url,job_title,"
-                        "job_type,salary_raw,posted_date,skills_required"
-                    )
-                    .in_("job_id", chunk)
-                    .execute()
+        for i in range(0, len(ids), 100):
+            chunk = ids[i:i + 100]
+            response = (
+                self.client.table("jobs")
+                .select(
+                    "job_id,job_description,company,location,url,job_title,"
+                    "job_type,salary_raw,posted_date,skills_required"
                 )
-                for row in response.data or []:
-                    if row.get("job_id"):
-                        found[row["job_id"]] = row
-        except APIError as e:
-            print(f"Failed to load jobs by id: {e}")
+                .in_("job_id", chunk)
+                .execute()
+            )
+            for row in response.data or []:
+                if row.get("job_id"):
+                    found[row["job_id"]] = row
         return found
+
+    def get_processed_ids(self, job_ids: List[str]) -> set:
+        """Return which of these job_ids are in processed_jobs. Raises on failure."""
+        ids = [job_id for job_id in job_ids if job_id]
+        found: set = set()
+        for i in range(0, len(ids), 100):
+            response = (
+                self.client.table("processed_jobs")
+                .select("job_id")
+                .in_("job_id", ids[i:i + 100])
+                .execute()
+            )
+            found.update(row["job_id"] for row in response.data or [] if row.get("job_id"))
+        return found
+
+    def mark_jobs_processed(self, job_ids: List[str]) -> None:
+        """Record processed job_ids in one upsert. Raises on failure."""
+        now = datetime.utcnow().isoformat()
+        rows = [{"job_id": job_id, "processed_at": now} for job_id in dict.fromkeys(job_ids) if job_id]
+        if rows:
+            self.client.table("processed_jobs").upsert(rows, on_conflict="job_id").execute()
+
+    def touch_jobs(self, job_ids: List[str]) -> None:
+        """Record that these jobs were seen again unchanged (processed_at = now).
+
+        date_scrapped stays the first-seen time so browse "today" and sort
+        order are unchanged; delete_stale_jobs spares rows seen recently.
+        Raises on failure.
+        """
+        self.mark_jobs_processed(list(job_ids))
 
     def is_job_processed(self, job_id: str) -> bool:
         """Return True if this job_id was already marked processed."""
@@ -263,31 +305,54 @@ class SupabaseService:
             return False
 
     def delete_stale_jobs(self, days: int = 7) -> int:
+        """Delete jobs first scraped before the cutoff and not seen since.
+
+        A job re-seen unchanged only refreshes processed_jobs.processed_at
+        (see touch_jobs), so date_scrapped alone would delete postings that
+        are still live.
+        """
         cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
         try:
-            stale = (
-                self.client.table("jobs")
-                .select("job_id")
-                .lt("date_scrapped", cutoff)
-                .execute()
-            )
-            stale_ids = [row["job_id"] for row in (stale.data or []) if row.get("job_id")]
+            # Page the candidates: an unpaged select is capped by PostgREST max-rows.
+            candidates: List[str] = []
+            offset = 0
+            while True:
+                page = (
+                    self.client.table("jobs")
+                    .select("job_id")
+                    .lt("date_scrapped", cutoff)
+                    .order("job_id")
+                    .range(offset, offset + 999)
+                    .execute()
+                )
+                ids = [row["job_id"] for row in (page.data or []) if row.get("job_id")]
+                candidates.extend(ids)
+                if len(ids) < 1000:
+                    break
+                offset += 1000
 
-            response = (
-                self.client.table("jobs")
-                .delete()
-                .lt("date_scrapped", cutoff)
-                .execute()
-            )
-            deleted = len(response.data) if response.data else len(stale_ids)
+            stale_ids: List[str] = []
+            for i in range(0, len(candidates), 100):
+                chunk = candidates[i:i + 100]
+                seen = (
+                    self.client.table("processed_jobs")
+                    .select("job_id")
+                    .in_("job_id", chunk)
+                    .gte("processed_at", cutoff)
+                    .execute()
+                )
+                recent = {row["job_id"] for row in (seen.data or [])}
+                stale_ids.extend(job_id for job_id in chunk if job_id not in recent)
 
-            if stale_ids:
-                self.client.table("processed_jobs").delete().in_("job_id", stale_ids).execute()
+            for i in range(0, len(stale_ids), 100):
+                chunk = stale_ids[i:i + 100]
+                self.client.table("jobs").delete().in_("job_id", chunk).execute()
+                self.client.table("processed_jobs").delete().in_("job_id", chunk).execute()
             self.client.table("processed_jobs").delete().lt("processed_at", cutoff).execute()
 
-            print(f"Deleted {deleted} stale jobs older than {days} days")
-            return deleted
-        except APIError as e:
+            print(f"Deleted {len(stale_ids)} stale jobs not seen in {days} days")
+            return len(stale_ids)
+        except (APIError, httpx.HTTPError) as e:
             print(f"Failed to delete stale jobs: {e}")
             return 0
 

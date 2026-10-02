@@ -133,7 +133,8 @@ class TestPerBoardPersist(unittest.TestCase):
         settings = _settings()
         totals = _TotalsAccumulator()
         supabase = Mock()
-        supabase.is_job_processed.return_value = False
+        supabase.get_processed_ids.return_value = set()
+        supabase.get_jobs_by_ids.return_value = {}
         supabase.bulk_insert_jobs.return_value = 1
 
         jobs_by_board = {
@@ -170,7 +171,7 @@ class TestPerBoardPersist(unittest.TestCase):
     def test_persist_updates_empty_jd_on_later_scrape(self):
         totals = _TotalsAccumulator()
         supabase = Mock()
-        supabase.is_job_processed.return_value = True
+        supabase.get_processed_ids.return_value = {"j1"}
         supabase.get_jobs_by_ids.return_value = {
             "j1": {"job_id": "j1", "job_description": "", "company": "Acme"}
         }
@@ -191,7 +192,7 @@ class TestPerBoardPersist(unittest.TestCase):
     def test_persist_skips_duplicate_when_still_empty(self):
         totals = _TotalsAccumulator()
         supabase = Mock()
-        supabase.is_job_processed.return_value = True
+        supabase.get_processed_ids.return_value = {"j1"}
         supabase.get_jobs_by_ids.return_value = {
             "j1": {
                 "job_id": "j1",
@@ -214,7 +215,7 @@ class TestPerBoardPersist(unittest.TestCase):
     def test_persist_reinserts_when_jobs_row_was_deleted(self):
         totals = _TotalsAccumulator()
         supabase = Mock()
-        supabase.is_job_processed.return_value = True
+        supabase.get_processed_ids.return_value = {"j1"}
         supabase.get_jobs_by_ids.return_value = {}
         supabase.bulk_insert_jobs.return_value = 1
         raw = [{"job_id": "j1", "title": "SE", "company": "Acme", "description": ""}]
@@ -222,12 +223,12 @@ class TestPerBoardPersist(unittest.TestCase):
             affected = _persist_scraped_jobs(raw, supabase, totals, 200, {})
         self.assertEqual(affected, 1)
         supabase.bulk_insert_jobs.assert_called_once()
-        supabase.mark_job_processed.assert_called_once_with("j1")
+        supabase.mark_jobs_processed.assert_called_once_with(["j1"])
 
     def test_persist_skips_new_indeed_card_without_jd(self):
         totals = _TotalsAccumulator()
         supabase = Mock()
-        supabase.is_job_processed.return_value = False
+        supabase.get_processed_ids.return_value = set()
         supabase.get_jobs_by_ids.return_value = {}
         raw = [{
             "job_id": "j1",
@@ -243,7 +244,7 @@ class TestPerBoardPersist(unittest.TestCase):
     def test_persist_writes_jobs_in_batches(self):
         totals = _TotalsAccumulator()
         supabase = Mock()
-        supabase.is_job_processed.return_value = False
+        supabase.get_processed_ids.return_value = set()
         supabase.get_jobs_by_ids.return_value = {}
         supabase.bulk_insert_jobs.side_effect = lambda batch: len(batch)
         raw = [
@@ -269,8 +270,7 @@ class TestPerBoardPersist(unittest.TestCase):
         self.assertEqual(len(enrich.call_args_list[0][0][0]["raw_job_list"]), 2)
         supabase.bulk_insert_jobs.assert_called_once()
         self.assertEqual(len(supabase.bulk_insert_jobs.call_args[0][0]), 2)
-        supabase.mark_job_processed.assert_any_call("j1")
-        supabase.mark_job_processed.assert_any_call("j2")
+        supabase.mark_jobs_processed.assert_called_once_with(["j1", "j2"])
 
 
 if __name__ == "__main__":

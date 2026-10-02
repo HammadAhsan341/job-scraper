@@ -9,7 +9,7 @@
 [![Supabase](https://img.shields.io/badge/Supabase-2.30-3ECF8E?logo=supabase&logoColor=white)](https://supabase.com)
 [![uv](https://img.shields.io/badge/uv-package%20manager-7C3AED)](https://github.com/astral-sh/uv)
 
-Scrape LinkedIn and Indeed for job listings in Pakistan. Cleans and enriches each posting, deduplicates in Supabase, and upserts the full enriched record.
+Scrape LinkedIn, Indeed, Rozee and Mustakbil for job listings in Pakistan (the scheduled CI runs cover LinkedIn and Indeed). Cleans and enriches each posting, deduplicates in Supabase, and upserts the full enriched record.
 
 </div>
 
@@ -35,9 +35,9 @@ Scrape LinkedIn and Indeed for job listings in Pakistan. Cleans and enriches eac
 
 ## Overview
 
-`main.py` iterates over a configured list of permitted roles and runs the full pipeline for each one using a configurable number of parallel workers (default: sequential). The spider fetches listing pages and individual job postings using Scrapling's `StealthyFetcher` which handles Cloudflare challenges and anti-bot detection. Each parser extracts structured fields from the board's HTML. Roles that fail during the main pass are retried once sequentially after all other roles complete.
+`main.py` iterates over a configured list of permitted roles and runs the full pipeline for each one using a configurable number of parallel workers (default: 4, `JOB_SCRAPING_WORKERS`). The spider fetches listing pages and individual job postings using Scrapling's `StealthyFetcher` which handles Cloudflare challenges and anti-bot detection. Each parser extracts structured fields from the board's HTML. A role whose boards all fail is retried once sequentially after all other roles complete.
 
-New jobs are checked against a Supabase `processed_jobs` table so duplicates are never written twice. Unique jobs pass through the enricher which cleans the description, matches skills against a master Excel list, parses experience level and year ranges, normalises salary strings and detects education and job type. The full enriched record is upserted to Supabase in batches of 200.
+New jobs are checked against a Supabase `processed_jobs` table so duplicates are never written twice. Unique jobs pass through the enricher which cleans the description, matches skills against a master Excel list, parses experience level and year ranges, normalises salary strings and detects education and job type. The full enriched record is upserted to Supabase in batches of 100; a batch that fails to save is retried at the end of the board.
 
 A separate `digital_scout_node` in `pipeline/scout.py` handles interactive, query-driven scraping with role-allowlist enforcement. It is not called by `main.py` but is available for integration into a wider agent workflow.
 
@@ -58,7 +58,7 @@ A separate `digital_scout_node` in `pipeline/scout.py` handles interactive, quer
 ┌─────────────────────────────────────────────────────────┐
 │  Spider  (scraper/spider.py)                            │
 │  StealthyFetcher with Cloudflare bypass                 │
-│  One parser per board - LinkedIn and Indeed             │
+│  Parsers: LinkedIn, Indeed, Rozee, Mustakbil            │
 │  Each with adaptive CSS selectors                       │
 └──────────────────────────┬──────────────────────────────┘
                            │
@@ -84,7 +84,7 @@ A separate `digital_scout_node` in `pipeline/scout.py` handles interactive, quer
 │  Supabase Upsert  (services/supabase.py)                │
 │  Full enriched payload + structured columns             │
 │  Batched upsert on conflict (job_id)                    │
-│  200 records per batch                                  │
+│  100 records per batch                                  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -138,7 +138,7 @@ Apply [`supabase/migrations/001_full_job_payload.sql`](supabase/migrations/001_f
 
 | Feature                    | Description                                                                               |
 | :------------------------- | :---------------------------------------------------------------------------------------- |
-| **Multi-board scraping**   | LinkedIn and Indeed with two alternating role sets                                        |
+| **Multi-board scraping**   | LinkedIn, Indeed, Rozee, Mustakbil; CI alternates LinkedIn and Indeed across two role sets |
 | **Anti-bot bypass**        | Scrapling `StealthyFetcher` with Cloudflare solver and headless/headful fallback          |
 | **Role allowlist**         | Only scrapes roles listed in `PERMITTED_ROLES` - rejects everything else                  |
 | **Supabase deduplication** | SHA-256 job IDs tracked in `processed_jobs`; stale IDs are cleared so listings can return |
@@ -215,7 +215,7 @@ The scraper is deployed via **GitHub Actions** with 8 scheduled runs per day - L
 | 10:00 AM   | Indeed   | Set 2    |
 | 1:00 PM    | LinkedIn | Set 1    |
 | 4:00 PM    | Indeed   | Set 1    |
-| 7:00 PM    | LinkedIn | Set 2    |
+| 8:00 PM    | LinkedIn | Set 2    |
 | 10:00 PM   | Indeed   | Set 2    |
 
 ### Setup

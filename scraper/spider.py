@@ -454,6 +454,7 @@ class JobScraperSpider:
             if not is_persistable_job(job, board_name):
                 return
             job = prepare_job_for_persist(job, board_name)
+            job_id = job.get("job_id") or ""
             desc = (job.get("description") or "").strip()
             prev_len = emitted_desc_len.get(job_id, -1)
             if job_id and len(desc) <= prev_len:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from scraper.job_identity import stable_job_id
+
 FULL_JD_MIN_LEN = 50
 INDEED_LISTING_MIN_LEN = 20
 INDEED_LISTING_PLACEHOLDER_MARKER = "Listing summary from Indeed search results"
@@ -67,6 +69,9 @@ def is_persistable_job(job: Dict[str, Any], board_hint: str = "") -> bool:
 
 def prepare_job_for_persist(job: Dict[str, Any], board_hint: str = "") -> Dict[str, Any]:
     prepared = ensure_indeed_listing_description(job)
-    if is_persistable_job(prepared, board_hint):
-        return prepared
-    return job
+    result = prepared if is_persistable_job(prepared, board_hint) else job
+    # Every write path goes through here, so this is where the stored id is set.
+    native_id = stable_job_id(result, board_hint)
+    if native_id and native_id != result.get("job_id"):
+        result = {**result, "job_id": native_id}
+    return result

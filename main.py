@@ -200,6 +200,7 @@ def _process_single_role(role, index, total, settings, supabase, totals, batch_s
                         if not is_persistable_job(job, board_name):
                             continue
                         job = prepare_job_for_persist(job, board_name)
+                        job_id = job.get("job_id")
                         desc = (job.get("description") or "").strip()
                         key = (job_id, len(desc))
                         if not job_id or key in queued:

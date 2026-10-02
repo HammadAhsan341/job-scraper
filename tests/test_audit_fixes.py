@@ -157,3 +157,38 @@ class TestBulkInsertDedup(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStableJobId(unittest.TestCase):
+    def setUp(self):
+        from scraper.job_identity import stable_job_id
+        from scraper.listing_persist import prepare_job_for_persist
+        self.sid = stable_job_id
+        self.prepare = prepare_job_for_persist
+
+    def test_indeed_same_jk_same_id_regardless_of_card_fields(self):
+        card = {"board": "indeed", "job_url": "https://pk.indeed.com/viewjob?jk=abc123def4567890", "title": "SE", "company": "Unknown"}
+        detail = {"board": "indeed", "job_url": "https://pk.indeed.com/rc/clk?jk=ABC123DEF4567890&from=serp", "title": "SE", "company": "Acme"}
+        self.assertEqual(self.sid(card), self.sid(detail))
+
+    def test_same_title_company_location_different_postings_differ(self):
+        a = {"board": "linkedin", "job_url": "https://www.linkedin.com/jobs/view/software-engineer-at-acme-4012345678?refId=x"}
+        b = {"board": "linkedin", "job_url": "https://www.linkedin.com/jobs/view/4099999999/"}
+        self.assertNotEqual(self.sid(a), self.sid(b))
+        self.assertEqual(self.sid(a), self.sid({"board": "linkedin", "job_url": "https://linkedin.com/jobs/view/4012345678"}))
+
+    def test_board_is_part_of_the_key(self):
+        url = "https://www.rozee.pk/acme-software-engineer-lahore-jobs-1234567"
+        self.assertNotEqual(self.sid({"board": "rozee", "job_url": url}), self.sid({"board": "mustakbil", "job_url": url}))
+
+    def test_search_pages_and_missing_urls_fall_back(self):
+        self.assertIsNone(self.sid({"board": "rozee", "job_url": "https://www.rozee.pk/job/jsearch/q/python"}))
+        self.assertIsNone(self.sid({"board": "mustakbil", "job_url": "https://www.mustakbil.com/jobs/search?keywords=x"}))
+        self.assertIsNone(self.sid({"board": "indeed", "job_url": ""}))
+
+    def test_prepare_sets_native_id_and_keeps_old_hash_without_url(self):
+        job = {"job_id": "oldhash", "board": "indeed", "job_url": "https://pk.indeed.com/viewjob?jk=abc123def4567890",
+               "title": "SE", "company": "Acme", "description": "A full description long enough to persist here."}
+        self.assertEqual(self.prepare(job)["job_id"], self.sid(job))
+        no_url = {**job, "job_url": ""}
+        self.assertEqual(self.prepare(no_url)["job_id"], "oldhash")

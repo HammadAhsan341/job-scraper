@@ -248,3 +248,103 @@ class TestLinkedInChrome(unittest.TestCase):
                 '<ul><li>Seniority level Entry level</li><li>Employment type Full-time</li></ul></section>')
         text, _ = extract_description_multi(html, None)
         self.assertEqual(text, jd)
+
+
+class TestIndeedBotWall(unittest.TestCase):
+    def setUp(self):
+        import scraper.spider as spider
+        self.spider = spider
+        spider._indeed_viewjob_blocks = 0
+
+    def tearDown(self):
+        self.spider._indeed_viewjob_blocks = 0
+
+    def test_detects_bot_redirect(self):
+        from types import SimpleNamespace
+        blocked = SimpleNamespace(url="https://secure.indeed.com/auth?continue=x&from=bot-detection-anonymous")
+        ok = SimpleNamespace(url="https://pk.indeed.com/viewjob?jk=abc")
+        self.assertTrue(self.spider.is_bot_detection(blocked))
+        self.assertFalse(self.spider.is_bot_detection(ok))
+
+    def test_viewjob_disabled_after_consecutive_blocks_and_reset_on_success(self):
+        for _ in range(self.spider.INDEED_VIEWJOB_BLOCK_LIMIT - 1):
+            self.spider._note_indeed_viewjob(blocked=True)
+        self.assertFalse(self.spider.indeed_viewjob_disabled())
+        self.spider._note_indeed_viewjob(blocked=False)
+        for _ in range(self.spider.INDEED_VIEWJOB_BLOCK_LIMIT):
+            self.spider._note_indeed_viewjob(blocked=True)
+        self.assertTrue(self.spider.indeed_viewjob_disabled())
+
+
+class TestDetailLoopMaxJobs(unittest.TestCase):
+    def test_every_card_gets_a_detail_fetch_when_cards_fill_max_jobs(self):
+        from types import SimpleNamespace
+        import scraper.spider as spider_mod
+        from scraper.boards.indeed import IndeedParser
+        from scraper.spider import JobScraperSpider
+
+        spider_mod._indeed_viewjob_blocks = 0
+        parser = IndeedParser()
+        cards = [
+            {"job_id": f"id{i}", "title": f"Engineer {i}", "company": "Acme", "location": "Lahore",
+             "job_url": f"https://pk.indeed.com/viewjob?jk={i}aaaaaaaaaaaaaaa", "board": "indeed",
+             "description": "snippet", "skills": []}
+            for i in range(3)
+        ]
+        listing = SimpleNamespace(url="https://pk.indeed.com/jobs", status=200, body="<html>jobs</html>")
+        wall = SimpleNamespace(url="https://secure.indeed.com/auth?from=bot-detection-anonymous", status=200, body="login")
+        detail_urls = []
+
+        def fake_fetch(url, *args, **kwargs):
+            if url == "https://pk.indeed.com/jobs":
+                return listing
+            detail_urls.append(url)
+            return wall
+
+        def fake_parse(_response):
+            parser._listing_jobs = [dict(c) for c in cards]
+            return [c["job_url"] for c in cards]
+
+        spider = JobScraperSpider()
+        spider.parsers["indeed"] = parser
+        spider.settings.job_scraping_download_delay = 0
+        with patch("scraper.spider._fetch_with_scrapling", side_effect=fake_fetch), \
+                patch.object(parser, "parse_listing", side_effect=fake_parse), \
+                patch.object(parser, "build_search_url", return_value="https://pk.indeed.com/jobs"):
+            spider.scrape_board("indeed", "Engineer", max_pages=1, max_jobs=3)
+        spider_mod._indeed_viewjob_blocks = 0
+
+        tried = {jk for jk in ("0aaa", "1aaa", "2aaa") if any(jk in u for u in detail_urls)}
+        self.assertEqual(tried, {"0aaa", "1aaa", "2aaa"})
+
+
+class TestIndeedFetchOptions(unittest.TestCase):
+    def _kwargs(self, url, board="indeed"):
+        import scraper.fetch_worker as fw
+        captured = {}
+
+        class FakeFetcher:
+            @staticmethod
+            def fetch(u, **kwargs):
+                captured.update(kwargs)
+                return "ok"
+
+        with patch.dict(sys.modules, {"scrapling": type(sys)("scrapling")}):
+            sys.modules["scrapling"].StealthyFetcher = FakeFetcher
+            fw._stealthy_fetch(url, board, True, 0, True)
+        return captured
+
+    def test_indeed_pane_skips_network_idle_and_selector_wait(self):
+        kw = self._kwargs("https://pk.indeed.com/jobs?q=x&l=Pakistan&vjk=abc")
+        self.assertFalse(kw["network_idle"])
+        self.assertNotIn("wait_selector", kw)
+        self.assertTrue(kw["disable_resources"])
+
+    def test_indeed_listing_waits_for_cards(self):
+        kw = self._kwargs("https://pk.indeed.com/jobs?q=x&l=Pakistan&start=10")
+        self.assertIn("job_seen_beacon", kw["wait_selector"])
+
+    def test_other_boards_unchanged(self):
+        kw = self._kwargs("https://www.rozee.pk/job/jsearch/q/x", board="rozee")
+        self.assertTrue(kw["network_idle"])
+        self.assertNotIn("wait_selector", kw)

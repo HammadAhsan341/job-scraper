@@ -42,6 +42,31 @@ _board_health_lock = threading.Lock()
 _board_consecutive_timeouts: Dict[str, int] = {}
 _board_cooldown_until: Dict[str, float] = {}
 _fetch_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="scrapling-fetch")
+
+# Indeed serves its search-results pane to CI runners but redirects viewjob to
+# secure.indeed.com/auth?...from=bot-detection. Each blocked viewjob cost up to
+# four browser loads (~60 s per job) and likely flagged the runner sooner, so
+# after a few consecutive bot redirects the run stops trying viewjob.
+INDEED_PANE_FULL_MIN = 200
+INDEED_VIEWJOB_BLOCK_LIMIT = 3
+_indeed_viewjob_blocks = 0
+_indeed_viewjob_lock = threading.Lock()
+
+
+def is_bot_detection(response) -> bool:
+    url = str(getattr(response, "url", "") or "").lower()
+    return "bot-detection" in url or ("secure.indeed.com/auth" in url)
+
+
+def _note_indeed_viewjob(blocked: bool) -> None:
+    global _indeed_viewjob_blocks
+    with _indeed_viewjob_lock:
+        _indeed_viewjob_blocks = _indeed_viewjob_blocks + 1 if blocked else 0
+
+
+def indeed_viewjob_disabled() -> bool:
+    with _indeed_viewjob_lock:
+        return _indeed_viewjob_blocks >= INDEED_VIEWJOB_BLOCK_LIMIT
 _mp_ctx = mp.get_context("spawn")
 _live_procs: set[Any] = set()
 _live_lock = threading.Lock()
@@ -532,6 +557,11 @@ class JobScraperSpider:
             response = None
             for headless in order:
                 response = _load(job_url, headless)
+                if board == "indeed" and response is not None and is_bot_detection(response):
+                    # Bot wall: another browser mode or following the
+                    # continue= URL lands on the same wall.
+                    _note_indeed_viewjob(blocked=True)
+                    return response
                 dest = destination_job_url(response, job_url)
                 landed = getattr(response, "url", "") or ""
                 bounced = is_auth_wall(response, job_url) or not response
@@ -648,9 +678,22 @@ class JobScraperSpider:
             listing_card=None,
             serp_page: int = 1,
         ):
-            """SERP pane is fast; viewjob is authoritative — keep the longest JD."""
+            """SERP pane first; viewjob only when the pane JD is missing or cut."""
             serp = _fetch_indeed_serp_jd(job_url, listing_card, serp_page=serp_page)
+            serp_job = None
+            if serp and not is_auth_wall(serp, job_url):
+                serp_job = _job_from_page(job_url, serp, listing_card)
+                serp_desc = (serp_job or {}).get("description") or ""
+                if len(serp_desc) >= INDEED_PANE_FULL_MIN and not description_looks_truncated(serp_desc):
+                    _attach_parsed_job(serp, serp_job)
+                    return serp
+            if indeed_viewjob_disabled():
+                if serp_job and len((serp_job.get("description") or "")) >= 50:
+                    _attach_parsed_job(serp, serp_job)
+                return serp
             view = _fetch_job_page(job_url)
+            if view is not None and not is_bot_detection(view):
+                _note_indeed_viewjob(blocked=False)
 
             best_resp = None
             best_job = None
@@ -666,7 +709,7 @@ class JobScraperSpider:
                     best_job = job_data
 
             desc_text = (best_job or {}).get("description") or ""
-            if best_resp and (
+            if best_resp and not indeed_viewjob_disabled() and (
                 best_len < 50 or description_looks_truncated(desc_text)
             ):
                 print("      retrying Indeed viewjob headful for full JD")
@@ -866,11 +909,11 @@ class JobScraperSpider:
                                 idx = jobs_by_url[job_url]
                                 _emit_job(jobs[idx])
 
+                        # No max_jobs break here: job_urls is already capped to the
+                        # free slots, and `jobs` already counts this page's listing
+                        # cards, so breaking on len(jobs) stopped after the first
+                        # detail and left the other cards without a description.
                         time.sleep(self.settings.job_scraping_download_delay)
-
-                        if max_jobs and len(jobs) >= max_jobs:
-                            print(f"   Reached max_jobs limit ({max_jobs})")
-                            break
 
                     except Exception as e:
                         print(f"      Job scrape error: {e}")

@@ -31,6 +31,9 @@ def _parser_for(board: str):
     return cls() if cls else None
 
 
+INDEED_LISTING_SELECTOR = "div.job_seen_beacon, li.css-5lfssm, div.result"
+
+
 def _stealthy_fetch(
     url: str,
     board: str,
@@ -51,6 +54,17 @@ def _stealthy_fetch(
     }
     if timeout_ms and timeout_ms > 0:
         kwargs["timeout"] = timeout_ms
+    if (board or "").lower() == "indeed" and "pk.indeed.com/jobs" in url:
+        # Indeed search pages poll forever, so network_idle (checked twice per
+        # load) always ran to the timeout: ~30-60 s per page. The pane JD
+        # (?vjk=) is read from mosaic JSON in the initial HTML, so the loaded
+        # DOM is enough; listing pages wait for the result cards. Images, fonts
+        # and media are never read.
+        kwargs["network_idle"] = False
+        kwargs["disable_resources"] = True
+        if "vjk=" not in url:
+            kwargs["wait_selector"] = INDEED_LISTING_SELECTOR
+            kwargs["wait_selector_state"] = "attached"
     if job_detail and (board or "").lower() == "linkedin":
         from scraper.linkedin_page import expand_linkedin_job_description
 

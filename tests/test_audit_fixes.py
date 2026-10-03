@@ -192,3 +192,30 @@ class TestStableJobId(unittest.TestCase):
         self.assertEqual(self.prepare(job)["job_id"], self.sid(job))
         no_url = {**job, "job_url": ""}
         self.assertEqual(self.prepare(no_url)["job_id"], "oldhash")
+
+
+class TestCacheRefresh(unittest.TestCase):
+    def test_skipped_without_url(self):
+        from services.cache_refresh import refresh_jobs_cache
+        with patch.dict(os.environ, {"JOBS_CACHE_REFRESH_URL": "", "JOBS_CRON_SECRET": "s"}):
+            self.assertFalse(refresh_jobs_cache())
+
+    def test_posts_secret_header(self):
+        from services import cache_refresh
+        seen = {}
+
+        class FakeResponse:
+            status = 200
+            def read(self, n): return b'{"ok":true}'
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(request, timeout):
+            seen["url"], seen["method"] = request.full_url, request.get_method()
+            seen["secret"] = request.get_header("X-cron-secret")
+            return FakeResponse()
+
+        env = {"JOBS_CACHE_REFRESH_URL": "https://api.example.com/api/v1/internal/jobs-cache/refresh", "JOBS_CRON_SECRET": "s3"}
+        with patch.dict(os.environ, env), patch.object(cache_refresh.urllib.request, "urlopen", fake_urlopen):
+            self.assertTrue(cache_refresh.refresh_jobs_cache())
+        self.assertEqual(seen, {"url": env["JOBS_CACHE_REFRESH_URL"], "method": "POST", "secret": "s3"})

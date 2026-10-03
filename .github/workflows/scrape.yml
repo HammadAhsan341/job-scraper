@@ -51,6 +51,9 @@ jobs:
       PYTHONUNBUFFERED: "1"
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      # Optional: rebuild the API's Redis jobs snapshot after the run.
+      JOBS_CACHE_REFRESH_URL: ${{ secrets.JOBS_CACHE_REFRESH_URL }}
+      JOBS_CRON_SECRET: ${{ secrets.JOBS_CRON_SECRET }}
       JOB_SCRAPING_MAX_PAGES_PER_BOARD: ${{ secrets.JOB_SCRAPING_MAX_PAGES_PER_BOARD }}
       JOB_SCRAPING_MAX_JOBS_PER_BOARD: ${{ secrets.JOB_SCRAPING_MAX_JOBS_PER_BOARD }}
       JOB_SCRAPING_DOWNLOAD_DELAY: ${{ secrets.JOB_SCRAPING_DOWNLOAD_DELAY }}

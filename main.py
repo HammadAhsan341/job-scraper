@@ -21,6 +21,7 @@ from core.settings import get_settings
 from services.job_record import incoming_improves_stored, merge_incoming_over_stored
 from services.supabase import get_supabase_service
 from scraper.listing_persist import is_persistable_job, prepare_job_for_persist
+from services.cache_refresh import refresh_jobs_cache
 from scraper.spider import JobScraperSpider
 
 PERSIST_BATCH_SIZE = 100
@@ -339,6 +340,10 @@ def run_bulk_pipeline():
     print(f"Jobs enriched: {totals.enriched}")
     print(f"DB upserts: {totals.db_upserts}")
     print("=" * 78 + "\n")
+
+    # The jobs listing reads Redis only; publish this run's jobs now rather
+    # than waiting for the API's next timed rebuild.
+    refresh_jobs_cache()
 
     return {
         "roles": len(roles),

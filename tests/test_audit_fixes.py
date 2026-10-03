@@ -344,6 +344,22 @@ class TestIndeedFetchOptions(unittest.TestCase):
         kw = self._kwargs("https://pk.indeed.com/jobs?q=x&l=Pakistan&start=10")
         self.assertIn("job_seen_beacon", kw["wait_selector"])
 
+    def test_linkedin_detail_waits_for_jd_not_network_idle(self):
+        import scraper.fetch_worker as fw
+        captured = {}
+
+        class FakeFetcher:
+            @staticmethod
+            def fetch(u, **kwargs):
+                captured.update(kwargs)
+                return "ok"
+
+        with patch.dict(sys.modules, {"scrapling": type(sys)("scrapling")}):
+            sys.modules["scrapling"].StealthyFetcher = FakeFetcher
+            fw._stealthy_fetch("https://pk.linkedin.com/jobs/view/x-1", "linkedin", True, 0, True, job_detail=True)
+        self.assertFalse(captured["network_idle"])
+        self.assertIn("show-more-less-html__markup", captured["wait_selector"])
+
     def test_other_boards_unchanged(self):
         kw = self._kwargs("https://www.rozee.pk/job/jsearch/q/x", board="rozee")
         self.assertTrue(kw["network_idle"])

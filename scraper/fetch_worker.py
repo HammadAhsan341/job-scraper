@@ -73,6 +73,10 @@ def _stealthy_fetch(
     if job_detail and (board or "").lower() == "linkedin":
         from scraper.linkedin_page import expand_linkedin_job_description
 
+        # The guest JD markup is in the served HTML, so waiting for the
+        # description element is enough; network_idle let tracking requests
+        # hold some loads until the 180 s hard timeout for the same JD.
+        kwargs["network_idle"] = False
         kwargs["page_action"] = expand_linkedin_job_description
         kwargs["wait_selector"] = (
             "div.show-more-less-html__markup, div.description__text, "

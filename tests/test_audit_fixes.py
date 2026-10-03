@@ -219,3 +219,32 @@ class TestCacheRefresh(unittest.TestCase):
         with patch.dict(os.environ, env), patch.object(cache_refresh.urllib.request, "urlopen", fake_urlopen):
             self.assertTrue(cache_refresh.refresh_jobs_cache())
         self.assertEqual(seen, {"url": env["JOBS_CACHE_REFRESH_URL"], "method": "POST", "secret": "s3"})
+
+
+class TestLinkedInChrome(unittest.TestCase):
+    def setUp(self):
+        from scraper.boards.linkedin_jd import strip_linkedin_chrome
+        self.strip = strip_linkedin_chrome
+
+    def test_drops_toggle_and_criteria_tail(self):
+        raw = ("We build security tooling. You will own incident response. "
+               "Show more Show less Seniority level Mid-Senior level Employment type Contract "
+               "Job function Engineering Industries IT Services and IT Consulting.")
+        self.assertEqual(self.strip(raw), "We build security tooling. You will own incident response.")
+
+    def test_criteria_without_toggle_and_trailing_see_more(self):
+        self.assertEqual(self.strip("Great role. Seniority level Entry level Employment type Full-time"), "Great role.")
+        self.assertEqual(self.strip("Great role… See more"), "Great role…")
+
+    def test_body_mentioning_employment_type_is_kept(self):
+        body = "Employment type: full time, onsite in Lahore. We value ownership."
+        self.assertEqual(self.strip(body), body)
+
+    def test_clean_markup_beats_longer_container_with_chrome(self):
+        from scraper.boards.linkedin_jd import extract_description_multi
+        jd = "We are hiring a backend engineer to design APIs and own reliability across services."
+        html = (f'<section class="description"><div class="show-more-less-html__markup">{jd}</div>'
+                '<button>Show more</button><button>Show less</button>'
+                '<ul><li>Seniority level Entry level</li><li>Employment type Full-time</li></ul></section>')
+        text, _ = extract_description_multi(html, None)
+        self.assertEqual(text, jd)

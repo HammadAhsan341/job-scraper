@@ -24,6 +24,30 @@ _ARTICLE_BODY_RE = re.compile(
 )
 
 
+# The outer description containers also hold the collapse button labels and the
+# job-criteria list ("Seniority level ... Employment type ... Industries").
+# Taking the longest candidate made those containers win, so every stored
+# LinkedIn JD ended with that UI text.
+_SHOW_MORE_LESS_RE = re.compile(r"\s*\bshow more\s+show less\b", re.IGNORECASE)
+_CRITERIA_TAIL_RE = re.compile(
+    r"\s*\bSeniority level\b.{0,200}?\bEmployment type\b.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_TRAILING_TOGGLE_RE = re.compile(r"(?:\s*\b(?:show|see) (?:more|less)\b[.…]*)+\s*$", re.IGNORECASE)
+
+
+def strip_linkedin_chrome(text: str) -> str:
+    """Drop the collapse-button labels and criteria list LinkedIn appends to a JD."""
+    if not text:
+        return ""
+    match = _SHOW_MORE_LESS_RE.search(text)
+    if match:
+        text = text[: match.start()]
+    text = _CRITERIA_TAIL_RE.sub("", text)
+    text = _TRAILING_TOGGLE_RE.sub("", text)
+    return text.strip()
+
+
 def _clean_html_text(raw: str) -> str:
     if not raw:
         return ""
@@ -119,6 +143,8 @@ def extract_description_multi(html: str, response: Any) -> Tuple[str, str]:
     for text in jsonld_job_descriptions(html):
         candidates.append(("jsonld", text))
 
+    candidates = [(source, strip_linkedin_chrome(text)) for source, text in candidates]
+    candidates = [(source, text) for source, text in candidates if text]
     if not candidates:
         return "", ""
 

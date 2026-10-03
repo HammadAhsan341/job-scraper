@@ -7,7 +7,8 @@ Indeed is a global job search engine with Pakistan listings.
 from typing import Optional, List, Any, Dict
 from core.state import JobData
 from scraper.guest import jsonld_job_description, jsonld_job_posting, pick_longer_description_job
-from scraper.boards.indeed_jd import extract_description_multi
+from scraper.boards.indeed_jd import _clean_html_text, extract_description_multi, jk_from_job_url
+from scraper.boards.indeed_pane_clicks import extract_clicked_pane_jds, extract_hidden_cards
 from .base import BaseJobParser
 
 
@@ -502,9 +503,24 @@ class IndeedParser(BaseJobParser):
                     self._listing_jobs.append(job)
                     urls.append(job_url)
 
+            html = self._get_html(response)
+            pane_jds = extract_clicked_pane_jds(html)
+            decoys = extract_hidden_cards(html)
+            if decoys:
+                # Hidden bot-trap cards: fetching one is a bot signal and they
+                # never carry a real posting.
+                self._listing_jobs = [
+                    j for j in self._listing_jobs if jk_from_job_url(j["job_url"]) not in decoys
+                ]
+                urls = [u for u in urls if jk_from_job_url(u) not in decoys]
+            for job in self._listing_jobs:
+                pane_html = pane_jds.get(jk_from_job_url(job["job_url"]))
+                if pane_html:
+                    job["description"] = _clean_html_text(pane_html)
+
             print(
                 f"Indeed: Found {len(urls)} job URLs "
-                f"({len(self._listing_jobs)} listing cards)"
+                f"({len(self._listing_jobs)} listing cards, {len(pane_jds)} clicked JDs)"
             )
         except Exception as e:
             print(f"Indeed listing parse error: {e}")

@@ -796,6 +796,21 @@ class JobScraperSpider:
                     else:
                         job_urls = [u for u in job_urls if u in jobs_by_url] + extra_urls[:remaining_slots]
 
+                if board == "indeed":
+                    # Cards whose JD was collected by clicking through the
+                    # results tab need no per-job page load (the loads Indeed
+                    # bot-walls); only the rest go to the detail fetch.
+                    pending_urls = []
+                    for job_url in job_urls:
+                        card = jobs[jobs_by_url[job_url]] if job_url in jobs_by_url else None
+                        card_desc = (card or {}).get("description") or ""
+                        if len(card_desc) >= INDEED_PANE_FULL_MIN and not description_looks_truncated(card_desc):
+                            print(f"      JD from results-tab click ({len(card_desc)} chars): {card['title']}")
+                            _emit_job(card)
+                        else:
+                            pending_urls.append(job_url)
+                    job_urls = pending_urls
+
                 auth_walls = 0
                 for i, job_url in enumerate(job_urls, 1):
                     if max_details > 0 and details_used >= max_details:

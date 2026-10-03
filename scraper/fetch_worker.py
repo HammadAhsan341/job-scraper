@@ -58,13 +58,18 @@ def _stealthy_fetch(
         # Indeed search pages poll forever, so network_idle (checked twice per
         # load) always ran to the timeout: ~30-60 s per page. The pane JD
         # (?vjk=) is read from mosaic JSON in the initial HTML, so the loaded
-        # DOM is enough; listing pages wait for the result cards. Images, fonts
-        # and media are never read.
+        # DOM is enough. Listing pages wait for the result cards, then click
+        # each one to collect every JD from this single page load.
         kwargs["network_idle"] = False
-        kwargs["disable_resources"] = True
         if "vjk=" not in url:
+            from scraper.boards.indeed_pane_clicks import collect_indeed_pane_jds
+
+            # Not disable_resources: card clicks never load the pane without them.
             kwargs["wait_selector"] = INDEED_LISTING_SELECTOR
             kwargs["wait_selector_state"] = "attached"
+            kwargs["page_action"] = collect_indeed_pane_jds
+        else:
+            kwargs["disable_resources"] = True
     if job_detail and (board or "").lower() == "linkedin":
         from scraper.linkedin_page import expand_linkedin_job_description
 

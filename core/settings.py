@@ -25,6 +25,8 @@ class Settings:
     job_scraping_max_jobs_per_board: int
     job_scraping_download_delay: float
     permitted_roles: List[str]
+    # Roles that also get a remote-anywhere search on LinkedIn/Indeed.
+    remote_roles: List[str]
     excel_skill_gap: str
     job_stale_after_days: int
     job_scraping_boards: List[str]
@@ -116,6 +118,13 @@ def _build_settings() -> Settings:
         ),
         permitted_roles=_parse_permitted_roles(
             os.getenv("PERMITTED_ROLES") or os.getenv("PERMITTED_ROLES_1")
+        ),
+        # Default keeps Graphic Designer's remote pass on in GitHub Actions without a new
+        # secret; REMOTE_ROLES=[] turns it off.
+        remote_roles=(
+            _parse_permitted_roles(os.getenv("REMOTE_ROLES"))
+            if os.getenv("REMOTE_ROLES")
+            else ["Graphic Designer"]
         ),
         excel_skill_gap=os.getenv("EXCEL_SKILL_GAP", "data/skills_master.xlsx"),
         job_stale_after_days=_get_env_int("JOB_STALE_AFTER_DAYS", 7),

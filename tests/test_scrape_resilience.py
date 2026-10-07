@@ -40,6 +40,7 @@ def _settings(**overrides):
         job_scraping_max_pages_per_board=1,
         job_scraping_max_jobs_per_board=5,
         job_scraping_boards=["rozee", "indeed"],
+        remote_roles=[],
     )
     values.update(overrides)
     return SimpleNamespace(**values)

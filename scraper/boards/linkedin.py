@@ -393,7 +393,10 @@ class LinkedInParser(BaseJobParser):
         # URL encode query
         import urllib.parse
         query_encoded = urllib.parse.quote(query)
-        location_encoded = urllib.parse.quote(location)
+        # "Remote" = remote jobs anywhere: LinkedIn's worldwide location plus its
+        # remote work-type filter (f_WT=2), rather than a place called "Remote".
+        remote = (location or "").strip().lower() == "remote"
+        location_encoded = urllib.parse.quote("Worldwide" if remote else location)
         
         url = (
             f"https://www.linkedin.com/jobs/search/"
@@ -401,6 +404,8 @@ class LinkedInParser(BaseJobParser):
             f"&location={location_encoded}"
             f"&start={start}"
         )
+        if remote:
+            url += "&f_WT=2"
         
         return url
 

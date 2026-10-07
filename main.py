@@ -164,6 +164,25 @@ def _persist_scraped_jobs(raw_jobs, supabase, totals, batch_size, state):
     return affected
 
 
+REMOTE_SEARCH_LOCATION = "Remote"
+# Rozee and Mustakbil only list Pakistan jobs, so only these boards get the remote pass.
+REMOTE_CAPABLE_BOARDS = ("linkedin", "indeed")
+
+
+def _role_searches(role, settings):
+    """(board, location) pairs for one role: every board in Pakistan, plus a
+    remote-anywhere pass on LinkedIn/Indeed for roles listed in REMOTE_ROLES."""
+    searches = [(board, "Pakistan") for board in settings.job_scraping_boards]
+    remote_roles = {r.strip().lower() for r in settings.remote_roles}
+    if role.strip().lower() in remote_roles:
+        searches += [
+            (board, REMOTE_SEARCH_LOCATION)
+            for board in settings.job_scraping_boards
+            if board in REMOTE_CAPABLE_BOARDS
+        ]
+    return searches
+
+
 def _process_single_role(role, index, total, settings, supabase, totals, batch_size=PERSIST_BATCH_SIZE):
     """
     Process one role board-by-board so a hang on LinkedIn cannot delay
@@ -185,10 +204,11 @@ def _process_single_role(role, index, total, settings, supabase, totals, batch_s
     }
 
     failed_boards = []
+    searches = _role_searches(role, settings)
     try:
         spider = JobScraperSpider()
-        for board in settings.job_scraping_boards:
-            print(f"   Board: {board}")
+        for board, location in searches:
+            print(f"   Board: {board} ({location})")
             try:
                 buffer = []
                 queued = set()
@@ -234,17 +254,17 @@ def _process_single_role(role, index, total, settings, supabase, totals, batch_s
                 raw_jobs = spider.scrape_board(
                     board=board,
                     query=role,
-                    location="Pakistan",
+                    location=location,
                     max_pages=settings.job_scraping_max_pages_per_board,
                     max_jobs=settings.job_scraping_max_jobs_per_board,
                     on_jobs=persist,
                 )
                 persist(raw_jobs, flush=True)
             except Exception as board_exc:
-                print(f"   Board {board} failed: {board_exc}")
-                failed_boards.append(board)
+                print(f"   Board {board} ({location}) failed: {board_exc}")
+                failed_boards.append(f"{board}/{location}")
                 continue
-        if failed_boards and len(failed_boards) == len(settings.job_scraping_boards):
+        if failed_boards and len(failed_boards) == len(searches):
             # Every board failed: count the role as failed so the retry pass
             # and the summary see it (previously this path always returned True).
             raise RuntimeError(f"all boards failed: {', '.join(failed_boards)}")

@@ -2,11 +2,11 @@ name: Daily Job Scrape
 
 on:
   schedule:
-    # Every hour. A 6–8h run used to overlap the next slots; GitHub then
-    # cancelled the queued runs, so nothing synced for 12h+. Each hour is
-    # one board + one role set (see "Resolve board and role set"). If that
-    # pass fetches nothing, the scrape step starts the scraper again.
-    - cron: "0 * * * *"
+    # GitHub often drops a run scheduled at minute 0 and does not retry it.
+    # Three off-peak attempts per hour; the gate skips one when this UTC
+    # hour already scraped successfully. Each hour is one board + one role
+    # set. If that pass fetches nothing, the scrape step starts again.
+    - cron: "13,33,53 * * * *"
   workflow_dispatch:
     inputs:
       boards:
@@ -38,6 +38,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   scrape:
@@ -82,25 +83,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip if this hour already scraped
+        id: gate
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/schedule_gate.py
+
       - uses: astral-sh/setup-uv@v5
+        if: github.event_name != 'schedule' || steps.gate.outputs.scrape == 'true'
         with:
           python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
+        if: github.event_name != 'schedule' || steps.gate.outputs.scrape == 'true'
         run: uv sync
 
       - name: Install Playwright browser
+        if: github.event_name != 'schedule' || steps.gate.outputs.scrape == 'true'
         run: uv run playwright install --with-deps chromium
 
       - name: Preflight (secrets + roles)
+        if: github.event_name != 'schedule' || steps.gate.outputs.scrape == 'true'
         run: uv run python scripts/validate_ci_env.py
 
       - name: Run unit tests
+        if: github.event_name != 'schedule' || steps.gate.outputs.scrape == 'true'
         run: uv run pytest tests/ -q --tb=line
 
       - name: Resolve board and role set
+        if: github.event_name != 'schedule' || steps.gate.outputs.scrape == 'true'
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "JOB_SCRAPING_BOARDS=${{ github.event.inputs.boards }}" >> "$GITHUB_ENV"
@@ -135,6 +149,7 @@ jobs:
           fi
 
       - name: Run scraper
+        if: github.event_name != 'schedule' || steps.gate.outputs.scrape == 'true'
         run: |
           set +e
           uv run python -u main.py

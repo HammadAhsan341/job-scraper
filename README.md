@@ -205,7 +205,7 @@ uv run python main.py
 
 **Canonical CI repo (public):** [github.com/HammadAhsan341/job-scraper](https://github.com/HammadAhsan341/job-scraper) — scheduled scrapes and manual runs use this repository’s Actions workflow.
 
-The scraper is deployed via **GitHub Actions** every hour (`0 * * * *`). Each hour scrapes one board and one role set, then stops after 22 minutes and syncs. If that pass fetches nothing, the same hour starts the scraper again. A run no longer sits for 6–8 hours and cancels the ones waiting behind it.
+The scraper is deployed via **GitHub Actions** every hour. GitHub often drops a run scheduled at minute 0, so the workflow tries at minutes 13, 33, and 53. A later attempt skips when this UTC hour already scraped successfully. Each hour scrapes one board and one role set, then stops after 22 minutes and syncs. If that pass fetches nothing, the same hour starts the scraper again. A run no longer sits for 6–8 hours and cancels the ones waiting behind it.
 
 The UTC hour picks the slot (`hour % 4`):
 
